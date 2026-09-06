@@ -1,0 +1,96 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  syntax:
+    name: PHP ${{ matrix.php }} syntax
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The module must stay parseable on every PHP version WHMCS 8.x/9.x runs on.
+        php: ['7.4', '8.0', '8.1', '8.2', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, json
+          coverage: none
+          tools: none
+
+      - name: php -l every file
+        run: |
+          status=0
+          while IFS= read -r -d '' file; do
+            if ! php -l "$file" > /dev/null; then
+              php -l "$file" || true
+              status=1
+            fi
+          done < <(find . -type f -name '*.php' -print0)
+          exit $status
+
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Only the documented PHP extensions are used
+        run: |
+          # The module documents curl + json as its only requirements.
+          if grep -rnE '\b(mysqli_|pg_|mcrypt_|ereg|imap_|ldap_)' --include='*.php' .; then
+            echo "::error::Unexpected PHP extension usage; the module requires only curl and json."
+            exit 1
+          fi
+
+      - name: TLS verification is not disabled
+        run: |
+          # SSL verification is deliberately not configurable: these calls carry
+          # credentials and decide whether money was received.
+          if grep -rniE 'CURLOPT_SSL_VERIFY(PEER|HOST)[[:space:]]*(=>|,)[[:space:]]*(false|0)\b' --include='*.php' .; then
+            echo "::error::TLS verification must never be disabled."
+            exit 1
+          fi
+
+      - name: No debug output left behind
+        run: |
+          if grep -rnE '\b(var_dump\(|dd\(|dump\()' --include='*.php' .; then
+            echo "::error::Remove debug output before merging."
+            exit 1
+          fi
+
+      - name: No hardcoded credentials
+        run: |
+          if grep -rnE "(merchantId|merchantPassword|password)[[:space:]]*=[[:space:]]*['\"][A-Za-z0-9_.-]{6,}['\"]" --include='*.php' .; then
+            echo "::error::Credentials must come from the gateway configuration, never from source."
+            exit 1
+          fi
+
+      - name: Module files are where WHMCS expects them
+        run: |
+          for f in \
+            modules/gateways/paystation.php \
+            modules/gateways/paystation/redirect.php \
+            modules/gateways/paystation/lib/loader.php \
+            modules/gateways/paystation/lib/Api.php \
+            modules/gateways/paystation/lib/Helper.php \
+            modules/gateways/callback/paystation.php \
+            includes/hooks/paystation_reconcile.php
+          do
+            test -f "$f" || { echo "::error::Missing $f"; exit 1; }
+          done

@@ -1,0 +1,27 @@
+# Normalise line endings in the repository; check out native on Windows.
+* text=auto
+
+*.php  text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.sh   text eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.zip binary
+
+# Keep repository furniture out of `git archive` release zips, so a released
+# archive contains only what gets uploaded to a WHMCS installation.
+/.github        export-ignore
+/.gitattributes export-ignore
+/.gitignore     export-ignore
+/.editorconfig  export-ignore
+/CONTRIBUTING.md      export-ignore
+/CODE_OF_CONDUCT.md   export-ignore
+/SECURITY.md          export-ignore
+
+# Treat PHP as PHP for linguist stats and diff hunk headers.
+*.php linguist-language=PHP diff=php

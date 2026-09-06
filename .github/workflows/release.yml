@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build a release for (e.g. v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build install zip and publish release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "number=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build install archive
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          NUMBER: ${{ steps.version.outputs.number }}
+        run: |
+          mkdir -p dist
+          # .gitattributes export-ignore keeps repository furniture out of the
+          # archive, so what ships is exactly what gets uploaded to WHMCS.
+          git archive --format=zip \
+            --prefix="paystation-whmcs-${NUMBER}/" \
+            -o "dist/paystation-whmcs-${NUMBER}.zip" \
+            "$TAG"
+          cd dist && sha256sum "paystation-whmcs-${NUMBER}.zip" > "paystation-whmcs-${NUMBER}.zip.sha256"
+
+      - name: Verify the archive contains the module files
+        env:
+          NUMBER: ${{ steps.version.outputs.number }}
+        run: |
+          unzip -l "dist/paystation-whmcs-${NUMBER}.zip"
+          for f in \
+            modules/gateways/paystation.php \
+            modules/gateways/paystation/redirect.php \
+            modules/gateways/paystation/lib/loader.php \
+            modules/gateways/paystation/lib/Api.php \
+            modules/gateways/paystation/lib/Helper.php \
+            modules/gateways/callback/paystation.php \
+            includes/hooks/paystation_reconcile.php \
+            README.md \
+            LICENSE
+          do
+            unzip -l "dist/paystation-whmcs-${NUMBER}.zip" | grep -q "paystation-whmcs-${NUMBER}/$f" \
+              || { echo "::error::Archive is missing $f"; exit 1; }
+          done
+
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          NUMBER: ${{ steps.version.outputs.number }}
+        run: |
+          awk -v ver="$NUMBER" '
+            $0 ~ "^## \[" ver "\]" { found = 1; next }
+            found && /^## \[/        { exit }
+            found                    { print }
+          ' CHANGELOG.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "No changelog entry found for $NUMBER." > release-notes.md
+          fi
+          cat release-notes.md
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          NUMBER: ${{ steps.version.outputs.number }}
+        run: |
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file release-notes.md \
+            "dist/paystation-whmcs-${NUMBER}.zip" \
+            "dist/paystation-whmcs-${NUMBER}.zip.sha256"

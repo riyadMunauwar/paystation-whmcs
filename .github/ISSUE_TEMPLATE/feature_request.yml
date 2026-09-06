@@ -1,0 +1,48 @@
+name: Feature request
+description: Suggest a change or addition to the module
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please open an issue before writing code — the module deliberately does not implement
+        things PayStation's API does not support (refunds and gateway fee capture, for example;
+        see *Known limitations* in the README).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like the module to do?
+    validations:
+      required: true
+
+  - type: input
+    id: api-support
+    attributes:
+      label: Which PayStation API endpoint or field supports this?
+      description: >
+        Link the relevant part of https://paystation.com.bd/documentation if the feature needs
+        something from PayStation. Leave blank if it is WHMCS-side only.
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility impact
+      description: >
+        Would this change existing configuration fields, the `mod_paystation_transactions`
+        table, or the payment flow for current installations?
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you have considered
+      description: Including whether this can be done today with a WHMCS hook instead.

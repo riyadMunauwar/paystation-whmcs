@@ -1,0 +1,132 @@
+name: Bug report
+description: Something in the module behaves incorrectly
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report.
+
+        **Do not use this form for security issues.** If a payment can be forged, replayed,
+        double-credited, or credentials can leak, follow
+        [SECURITY.md](https://github.com/riyadmunauwar/paystation-whmcs/blob/main/SECURITY.md)
+        instead.
+
+        **Redact everything sensitive** before you paste it: merchant ID, merchant password,
+        transaction ids, customer names, phone numbers and email addresses. Gateway log entries
+        usually contain live values.
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you file
+      options:
+        - label: I have read the Troubleshooting section of the README.
+          required: true
+        - label: This is not a security vulnerability report.
+          required: true
+        - label: I have removed credentials and customer data from everything I am pasting below.
+          required: true
+
+  - type: input
+    id: module-version
+    attributes:
+      label: Module version
+      description: The `@version` in `modules/gateways/paystation.php`, or the commit SHA.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: whmcs-version
+    attributes:
+      label: WHMCS version
+      placeholder: "8.13.1"
+    validations:
+      required: true
+
+  - type: input
+    id: php-version
+    attributes:
+      label: PHP version
+      placeholder: "8.2.20"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: PayStation environment
+      options:
+        - Sandbox
+        - Production
+        - Both
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where does it go wrong?
+      options:
+        - Gateway configuration / activation
+        - Pay Now button on the invoice
+        - Redirect to the PayStation checkout page
+        - Return from checkout (callback / verification)
+        - Cron reconciliation
+        - Amounts, surcharges or currency conversion
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create an invoice for BDT 500
+        2. Click Pay Now
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: gateway-log
+    attributes:
+      label: Gateway log entries
+      description: >
+        From Billing → Gateway Log, for the affected transaction. **Redact the merchant ID,
+        password, customer details and transaction ids.** This is rendered as a code block.
+      render: text
+
+  - type: textarea
+    id: ledger-row
+    attributes:
+      label: Ledger row
+      description: >
+        Optional but very helpful — the matching row from `mod_paystation_transactions`
+        (`status`, `applied`, `invoice_number`, amounts). Redact identifiers.
+      render: text
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant gateway configuration
+      description: >
+        Sandbox mode, invoice prefix, gateway charge bearer, EMI, conversion rate, surcharges,
+        cron reconciliation, verbose log. **Never include the merchant password.**
+
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else
+      description: Custom hooks, a reverse proxy, a non-standard WHMCS path, unusual PHP config.

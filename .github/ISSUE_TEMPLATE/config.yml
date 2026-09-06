@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/riyadmunauwar/paystation-whmcs/security/advisories/new
+    about: Report privately. Please do not open a public issue for a security problem.
+  - name: Questions and setup help
+    url: https://github.com/riyadmunauwar/paystation-whmcs/discussions
+    about: Ask about installation, configuration or the payment flow.
+  - name: PayStation API and merchant account
+    url: https://paystation.com.bd/documentation
+    about: Credentials, merchant onboarding, EMI activation and API behaviour are PayStation's, not this module's.
+  - name: WHMCS itself
+    url: https://www.whmcs.com/support/
+    about: Bugs in WHMCS, licensing and cron setup belong with WHMCS support.
