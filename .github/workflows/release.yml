@@ -67,10 +67,10 @@ jobs:
         env:
           NUMBER: ${{ steps.version.outputs.number }}
         run: |
-          awk -v ver="$NUMBER" '
-            $0 ~ "^## \[" ver "\]" { found = 1; next }
-            found && /^## \[/        { exit }
-            found                    { print }
+          awk -v hdr="## [$NUMBER]" '
+            index($0, hdr) == 1 { found = 1; next }
+            found && /^## \[/   { exit }
+            found               { print }
           ' CHANGELOG.md > release-notes.md
           if [ ! -s release-notes.md ]; then
             echo "No changelog entry found for $NUMBER." > release-notes.md
