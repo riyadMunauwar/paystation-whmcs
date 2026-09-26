@@ -306,13 +306,14 @@ class Helper
      *
      * @param string $status
      *
-     * @return string One of success, processing, failed, refund or unknown.
+     * @return string One of success, processing, failed, canceled, refund or
+     *                unknown.
      */
     public static function normaliseTrxStatus($status)
     {
         $status = strtolower(trim((string) $status));
 
-        $known = ['success', 'processing', 'failed', 'refund'];
+        $known = ['success', 'processing', 'failed', 'canceled', 'refund'];
         if (in_array($status, $known, true)) {
             return $status;
         }
@@ -326,8 +327,14 @@ class Helper
         if ($status === 'refunded') {
             return 'refund';
         }
-        if ($status === 'cancel' || $status === 'cancelled' || $status === 'canceled') {
-            return 'failed';
+        // Backing out of the wallet page is not a failure: nothing was charged
+        // and nothing went wrong. Kept distinct from "failed" so the customer
+        // can simply be told the payment was cancelled, instead of being shown
+        // a declined-payment error with a reference to quote to support.
+        $cancelled = ['cancel', 'cancelled', 'canceled', 'aborted', 'user cancel', 'user cancelled',
+            'user canceled', 'payment cancelled', 'payment canceled'];
+        if (in_array($status, $cancelled, true)) {
+            return 'canceled';
         }
 
         return $status === '' ? 'unknown' : $status;
@@ -815,6 +822,10 @@ class Helper
         return [
             'invoice_number' => isset($data['invoice_number']) ? (string) $data['invoice_number'] : '',
             'trx_status' => self::normaliseTrxStatus(isset($data['trx_status']) ? $data['trx_status'] : ''),
+            // PayStation's own spelling, kept for the logs: the normalised
+            // value above is this module's word, not the gateway's, and quoting
+            // it back at a merchant hides what PayStation actually said.
+            'trx_status_raw' => isset($data['trx_status']) ? trim((string) $data['trx_status']) : '',
             'trx_id' => isset($data['trx_id']) ? trim((string) $data['trx_id']) : '',
             'amount' => $requested,
             'payment_method' => isset($data['payment_method']) ? (string) $data['payment_method'] : '',
@@ -895,7 +906,15 @@ class Helper
 
         if ($status !== 'success') {
             self::updateTransaction($invoiceNumber, $ledger);
-            $result['reason'] = 'PayStation reported trx_status "' . $status . '".';
+
+            $reported = isset($statusData['trx_status_raw']) && $statusData['trx_status_raw'] !== ''
+                ? $statusData['trx_status_raw']
+                : $status;
+
+            $result['reason'] = $status === 'canceled'
+                ? ('The checkout was cancelled before the payment completed; PayStation reported '
+                    . 'trx_status "' . $reported . '".')
+                : ('PayStation reported trx_status "' . $reported . '".');
 
             return $result;
         }
@@ -1072,14 +1091,14 @@ class Helper
                     'invoice_id' => $transaction['invoice_id'],
                     'result' => $outcome,
                 ], 'Success');
-            } elseif (in_array($outcome['status'], ['failed', 'mismatch', 'orphaned'], true)) {
+            } elseif (in_array($outcome['status'], ['failed', 'canceled', 'mismatch', 'orphaned'], true)) {
                 $summary['failed']++;
                 self::log($gatewayParams, [
                     'context' => 'Cron Reconciliation',
                     'invoice_number' => $invoiceNumber,
                     'invoice_id' => $transaction['invoice_id'],
                     'result' => $outcome,
-                ], 'Unsuccessful');
+                ], $outcome['status'] === 'canceled' ? 'Cancelled' : 'Unsuccessful');
             }
         }
 
@@ -1123,8 +1142,10 @@ class Helper
     //   reason  - operator facing, logged in full. Names log paths, table
     //             names, database errors, PHP extensions, endpoints, HTTP
     //             codes, PayStation's own message and whether credentials are
-    //             set. Shown on screen to a logged in admin and to nobody
-    //             else, because it describes the hosting environment.
+    //             set. Never rendered in a browser, for anybody: it describes
+    //             the hosting environment, and the pages that show a failure
+    //             are client area pages that an administrator may well be
+    //             logged in to at the same time.
     //   message - customer facing. Says what happened and what to do about it,
     //             and never names a file, a table, a setting, a server or a
     //             PayStation response. Always accompanied by the error code
@@ -1431,6 +1452,59 @@ class Helper
      */
     public static function fail(array $gatewayParams, $code, $reason, array $context = [], $customerMessage = '')
     {
+        return self::record($gatewayParams, $code, $reason, $context, $customerMessage, 'error');
+    }
+
+    /**
+     * Record a checkout the customer deliberately abandoned.
+     *
+     * A cancellation is not an incident: nothing was charged, nothing is broken
+     * and there is nothing for support to look into. It is still logged, so a
+     * merchant can see how many checkouts are being abandoned and where, but it
+     * is logged as a cancellation rather than as a failure - it stays out of the
+     * activity log, and the customer is shown a plain note instead of a red
+     * error box carrying a reference to quote.
+     *
+     * @param array  $gatewayParams
+     * @param string $code
+     * @param string $reason          Operator facing explanation, logged in full.
+     * @param array  $context
+     * @param string $customerMessage
+     *
+     * @return array The stored entry.
+     */
+    public static function cancelled(
+        array $gatewayParams,
+        $code,
+        $reason,
+        array $context = [],
+        $customerMessage = ''
+    ) {
+        return self::record($gatewayParams, $code, $reason, $context, $customerMessage, 'notice');
+    }
+
+    /**
+     * Write one outcome to every log, and stash it for the next page load.
+     *
+     * @param array  $gatewayParams
+     * @param string $code
+     * @param string $reason
+     * @param array  $context
+     * @param string $customerMessage
+     * @param string $level           'error' for a failure, 'notice' for
+     *                                something the customer chose to do.
+     *
+     * @return array The stored entry.
+     */
+    protected static function record(
+        array $gatewayParams,
+        $code,
+        $reason,
+        array $context,
+        $customerMessage,
+        $level
+    ) {
+        $isNotice = ($level === 'notice');
         $reference = self::errorReference();
         $invoiceId = isset($context['invoice_id']) ? (int) $context['invoice_id'] : 0;
 
@@ -1444,20 +1518,25 @@ class Helper
             'error_reference' => $reference,
             'reason' => $reason,
             'log_file' => $logPath !== '' ? $logPath : 'no writable log directory',
-        ], $context), 'Unsuccessful');
+        ], $context), $isNotice ? 'Cancelled' : 'Unsuccessful');
 
-        self::logActivityLine(
-            'PayStation ' . $code . ' [' . $reference . ']'
-            . ($invoiceId > 0 ? ' invoice ' . $invoiceId : '')
-            . ': ' . self::flattenForLog($reason)
-            . ($logPath !== '' ? ' (detail: ' . $logPath . ')' : '')
-        );
+        // The activity log is where a merchant looks for things that need
+        // attention, so a routine cancellation does not belong in it.
+        if (!$isNotice) {
+            self::logActivityLine(
+                'PayStation ' . $code . ' [' . $reference . ']'
+                . ($invoiceId > 0 ? ' invoice ' . $invoiceId : '')
+                . ': ' . self::flattenForLog($reason)
+                . ($logPath !== '' ? ' (detail: ' . $logPath . ')' : '')
+            );
+        }
 
         $error = [
             'code' => (string) $code,
             'reference' => $reference,
             'reason' => (string) $reason,
             'message' => $customerMessage !== '' ? (string) $customerMessage : self::CUSTOMER_FALLBACK_MESSAGE,
+            'level' => $isNotice ? 'notice' : 'error',
             'invoice_id' => $invoiceId,
             'log_file' => $logPath,
             'time' => time(),
@@ -1595,6 +1674,11 @@ class Helper
             return null;
         }
 
+        // An entry stored before this version was installed has no level.
+        if (!isset($error['level']) || $error['level'] !== 'notice') {
+            $error['level'] = 'error';
+        }
+
         return $error;
     }
 
@@ -1613,16 +1697,17 @@ class Helper
     }
 
     /**
-     * True when the current viewer may be shown the technical reason.
+     * True when the current viewer is a logged in WHMCS administrator.
      *
-     * A logged in WHMCS administrator, and nobody else. The technical reason
-     * names absolute log paths, database errors, table names, PHP extensions,
-     * PayStation endpoints and whether credentials are set - detail about the
-     * hosting environment that must never reach a customer's browser.
-     *
-     * Verbose Gateway Log deliberately does not open this up: it is a logging
-     * switch, and a merchant turning it on to diagnose a problem would
-     * otherwise publish that detail to every customer paying at the time.
+     * Used only to decide whether to add a line pointing at the Gateway Log.
+     * The technical reason itself is never rendered in a browser by any page in
+     * this module, whoever is looking: it names absolute log paths, database
+     * errors, table names, PHP extensions, PayStation endpoints and credential
+     * state, and this check cannot tell the difference between an admin on their
+     * own screen and an admin session that is also logged in to the client area
+     * - or one using "Login as Client" - which is how that detail ended up in
+     * front of paying customers. The reason lives in the logs; the reference on
+     * screen is what ties the two together.
      *
      * @param array $gatewayParams Unused; kept so existing call sites and any
      *                             local customisations keep working.
@@ -1656,14 +1741,27 @@ class Helper
     /**
      * Standalone error page, for failures with no invoice to return to.
      *
-     * @param array $error      Output of Helper::fail().
-     * @param bool  $showDetail Include the technical reason.
-     * @param int   $httpStatus
+     * Shows the customer facing message, the error code and the reference, and
+     * nothing else. The operator facing reason and the log path are deliberately
+     * absent - they are in the three logs, which is where an administrator reads
+     * them.
+     *
+     * @param array  $error      Output of Helper::fail() or Helper::cancelled().
+     * @param bool   $isAdmin    Add a line pointing at the Gateway Log.
+     * @param int    $httpStatus
+     * @param string $heading    Page heading. Defaults to wording that suits a
+     *                           failure at any point in the payment.
      *
      * @return void
      */
-    public static function renderErrorPage(array $error, $showDetail = false, $httpStatus = 400)
+    public static function renderErrorPage(array $error, $isAdmin = false, $httpStatus = 400, $heading = '')
     {
+        $isNotice = isset($error['level']) && $error['level'] === 'notice';
+
+        if ($heading === '') {
+            $heading = $isNotice ? 'Payment cancelled' : 'This payment could not be completed';
+        }
+
         if (!headers_sent()) {
             http_response_code((int) $httpStatus);
             header('Content-Type: text/html; charset=utf-8');
@@ -1675,27 +1773,26 @@ class Helper
 
         echo '<!doctype html><html lang="en"><head><meta charset="utf-8">'
             . '<meta name="viewport" content="width=device-width,initial-scale=1">'
-            . '<title>PayStation payment could not be started</title>'
+            . '<title>' . $escape($heading) . '</title>'
             . '<style>body{font:14px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:40px 20px;'
             . 'background:#f6f7f9;color:#1f2933}main{max-width:640px;margin:0 auto;background:#fff;border:1px solid #e1e5ea;'
             . 'border-radius:8px;padding:24px}h1{font-size:19px;margin:0 0 12px}code{background:#f0f2f5;padding:1px 5px;'
-            . 'border-radius:3px}pre{background:#f0f2f5;padding:12px;border-radius:4px;white-space:pre-wrap;'
-            . 'word-break:break-word;margin:12px 0 0}.ref{color:#6b7684;font-size:12px;margin-top:16px}</style>'
+            . 'border-radius:3px}.ref{color:#6b7684;font-size:12px;margin-top:16px}</style>'
             . '</head><body><main>'
-            . '<h1>The PayStation payment could not be started</h1>'
+            . '<h1>' . $escape($heading) . '</h1>'
             . '<p>' . $escape($error['message']) . '</p>';
 
-        if ($showDetail && $error['reason'] !== $error['message']) {
-            echo '<pre>' . $escape($error['reason']) . '</pre>';
+        if (!$isNotice) {
+            echo '<p class="ref">Error code <code>' . $escape($error['code']) . '</code> &middot; reference <code>'
+                . $escape($error['reference']) . '</code>. Quote this reference to support.</p>';
         }
 
-        if ($showDetail && !empty($error['log_file'])) {
-            echo '<p class="ref">Logged to <code>' . $escape($error['log_file']) . '</code></p>';
+        if ($isAdmin) {
+            echo '<p class="ref">Administrator: the full reason is in Billing &raquo; Gateway Log, '
+                . 'and in the module log file on the server.</p>';
         }
 
-        echo '<p class="ref">Error code <code>' . $escape($error['code']) . '</code> &middot; reference <code>'
-            . $escape($error['reference']) . '</code>. Quote this reference to support.</p>'
-            . '</main></body></html>';
+        echo '</main></body></html>';
 
         exit;
     }

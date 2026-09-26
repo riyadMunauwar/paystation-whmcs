@@ -228,17 +228,25 @@ does not go through never leaves you guessing.
 successful"*, the module renders its own message, an **error code** such as `PS-DECLINED`, and a
 **reference** such as `PS9F2A41C7`.
 
+A cancelled checkout is the exception: it is not a failure, so it gets a plain note saying nothing
+was charged, with no error code and no reference to quote. It is still recorded in the logs as
+`PS-CB-CANCELLED`.
+
 Every failure carries two texts, and only one of them is ever public:
 
 | | Audience | Content | Where it appears |
 |---|---|---|---|
 | **Customer message** | anyone | What happened and what to do next. Names no file path, table, gateway setting, PHP extension, HTTP code or PayStation response. | The invoice page, plus the error code and reference. |
-| **Technical reason** | operators | The full cause: log paths, database errors, table names, endpoints, PayStation's own `status_code` and message, whether credentials are set. | The three logs below — and on screen **only** for a logged-in WHMCS admin. |
+| **Technical reason** | operators | The full cause: log paths, database errors, table names, endpoints, PayStation's own `status_code` and message, whether credentials are set. | The three logs below, and nowhere else. It is never rendered in a browser. |
 
-**Verbose Gateway Log does not change what a customer sees.** It is a logging switch only, so
-turning it on to diagnose a problem never publishes server detail to customers paying at the time.
-To read the technical reason on the page itself, reproduce the failure while logged in as an admin;
-otherwise take the reference from the customer and look it up in the logs.
+**The technical reason is never put on a web page — not even for an admin.** The pages that report a
+failure are client-area pages, and an administrator viewing an invoice is looking at exactly what the
+customer sees; a WHMCS admin session can also be a client-area session, and *Login as Client* keeps
+it. Detecting "the viewer is an admin" is therefore not a safe gate for server detail, so nothing
+reads it out on screen. An admin viewing a failure gets a line pointing at the Gateway Log, and the
+reference; take the reference and read the reason there or in the module log file.
+
+**Verbose Gateway Log does not change what a customer sees either.** It is a logging switch only.
 
 **In `modules/gateways/paystation/logs/paystation-YYYY-MM-DD.log`.** Written on every failure,
 regardless of whether the WHMCS gateway log is enabled, and the first place to look:
@@ -285,6 +293,7 @@ unlike the gateway log, cannot be switched off.
 | `PS-BAD-URL` | The returned checkout URL was not HTTPS on a `paystation.com.bd` host. |
 | `PS-CB-NO-MATCH` | A callback arrived that matches no local transaction. |
 | `PS-CB-UNVERIFIED` | The status lookup failed; cron will retry, so do not pay again. |
+| `PS-CB-CANCELLED` | Not a failure — the customer backed out of the checkout. Nothing was charged; no activity-log entry. |
 | `PS-CB-DECLINED` | PayStation reported the payment did not succeed. |
 | `PS-CB-MISMATCH` | Verified, but the amount or invoice number did not match — **manual review**. |
 | `PS-CB-ORPHANED` | The payment succeeded but its WHMCS invoice no longer exists. |
@@ -304,6 +313,7 @@ Everything lands under **Billing → Gateway Log**, keyed by context:
 | `Success` | Verified and applied to the invoice. |
 | `Pending` | PayStation reports `processing`; cron will retry. |
 | `Unsuccessful` | `failed`, amount mismatch, invoice mismatch, or an initiation error. |
+| `Cancelled` | The customer abandoned the checkout. Nothing was charged and nothing needs attention. |
 | `Verification Failed` | The status lookup itself failed; the row stays pending for cron. |
 | `Cron Reconciliation Summary` | Sweep results, logged only when something changed. |
 
@@ -319,6 +329,7 @@ Everything lands under **Billing → Gateway Log**, keyed by context:
 | `processing` | PayStation reports the payment is in flight. |
 | `success` | Verified successful (see `applied` for whether WHMCS was credited). |
 | `failed` | PayStation reports failure. |
+| `canceled` | The customer cancelled at the wallet or closed the checkout. |
 | `refund` | PayStation reports a refund. |
 | `mismatch` | Verified successful but the amount or invoice number did not match — **needs manual review**. |
 | `orphaned` | The WHMCS invoice no longer exists. |
@@ -359,8 +370,8 @@ longer uses that redirect: it returns you to the invoice with its own message na
 reason, plus an error code and reference. If you are still seeing WHMCS's wording, either an older
 copy of the module is installed, or the failed payment came from a *different* gateway.
 
-To see the full technical reason on the page itself, reproduce the failure while logged in as an
-admin — customers never get it, whatever the logging settings say. Either way the detail is in
+The full technical reason is never shown on the page, to anyone, whatever the logging settings say.
+Take the reference from the screen and read the detail in
 `modules/gateways/paystation/logs/paystation-YYYY-MM-DD.log` — see
 [Diagnosing a failure](#diagnosing-a-failure) for the error-code table. If the failure happened
 *immediately* on clicking Pay Now, the PayStation checkout was never reached and the entry comes

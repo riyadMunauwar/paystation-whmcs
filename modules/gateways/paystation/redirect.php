@@ -37,7 +37,7 @@ if (empty($gatewayParams['type'])) {
         'This payment method is not available right now. Please contact support.'
     );
 
-    Helper::renderErrorPage($error, Helper::maySeeDetail([]), 403);
+    Helper::renderErrorPage($error, Helper::maySeeDetail([]), 403, 'The PayStation payment could not be started');
 }
 
 if (!Helper::ensureSchema()) {
@@ -64,7 +64,7 @@ if (!Helper::ensureSchema()) {
         Helper::redirect(Helper::invoiceErrorUrl($postedInvoiceId, $error));
     }
 
-    Helper::renderErrorPage($error, Helper::maySeeDetail($gatewayParams), 500);
+    Helper::renderErrorPage($error, Helper::maySeeDetail($gatewayParams), 500, 'The PayStation payment could not be started');
 }
 
 /**
@@ -105,7 +105,7 @@ function paystation_redirect_abort(
         Helper::redirect(Helper::invoiceErrorUrl($invoiceId, $error));
     }
 
-    Helper::renderErrorPage($error, Helper::maySeeDetail($gatewayParams), 400);
+    Helper::renderErrorPage($error, Helper::maySeeDetail($gatewayParams), 400, 'The PayStation payment could not be started');
 }
 
 /**
@@ -163,7 +163,7 @@ if ($invoiceId <= 0) {
         'This payment link is incomplete. Please start again from your invoice.'
     );
 
-    Helper::renderErrorPage($error, Helper::maySeeDetail($gatewayParams), 400);
+    Helper::renderErrorPage($error, Helper::maySeeDetail($gatewayParams), 400, 'The PayStation payment could not be started');
 }
 
 if (!Helper::verifyPaymentToken($token, $invoiceId, $userId, $expires, $gatewayParams)) {

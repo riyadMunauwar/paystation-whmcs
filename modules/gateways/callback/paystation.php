@@ -104,6 +104,35 @@ function paystation_callback_value(array $payload, array $keys)
 }
 
 /**
+ * True when the browser came back saying the customer cancelled.
+ *
+ * This only ever chooses wording. Whether a payment is applied is decided by
+ * the server to server status lookup and nothing else, so a forged "cancelled"
+ * in the query string cannot make a real payment disappear - both paths apply
+ * nothing. It matters because PayStation reports some abandoned checkouts as a
+ * plain failure, and telling someone who pressed Cancel that their payment was
+ * declined sends them to support over nothing.
+ *
+ * @param array $payload
+ *
+ * @return bool
+ */
+function paystation_callback_was_cancelled(array $payload)
+{
+    $reported = paystation_callback_value($payload, [
+        'trx_status',
+        'trxStatus',
+        'status',
+        'payment_status',
+        'paymentStatus',
+        'transaction_status',
+        'error',
+    ]);
+
+    return $reported !== '' && Helper::normaliseTrxStatus($reported) === 'canceled';
+}
+
+/**
  * True when this request is PayStation's server to server IPN rather than the
  * customer's browser coming back from the hosted checkout.
  *
@@ -189,6 +218,9 @@ function paystation_callback_acknowledge($httpStatus, $status)
  * @param string $customerMessage Wording shown to the customer on a failure.
  *                           Must be safe for anyone to read: the reason in
  *                           $detail is logged, not displayed.
+ * @param string $level      'error' for a failure, or 'notice' for an outcome
+ *                           the customer chose - a cancelled checkout, which is
+ *                           recorded but not presented as something broken.
  *
  * @return void
  */
@@ -201,22 +233,22 @@ function paystation_callback_finish(
     $flag,
     $ipnStatus = 200,
     $errorCode = '',
-    $customerMessage = ''
+    $customerMessage = '',
+    $level = 'error'
 ) {
     $context = paystation_callback_is_ipn() ? 'IPN' : 'Callback';
 
     if ($errorCode !== '') {
-        $error = Helper::fail(
-            $gatewayParams,
-            $errorCode,
-            isset($detail['reason']) ? (string) $detail['reason'] : $status,
-            array_merge([
-                'context' => $context,
-                'invoice_id' => (int) $invoiceId,
-                'callback_payload' => $payload,
-            ], $detail),
-            $customerMessage
-        );
+        $reason = isset($detail['reason']) ? (string) $detail['reason'] : $status;
+        $logContext = array_merge([
+            'context' => $context,
+            'invoice_id' => (int) $invoiceId,
+            'callback_payload' => $payload,
+        ], $detail);
+
+        $error = $level === 'notice'
+            ? Helper::cancelled($gatewayParams, $errorCode, $reason, $logContext, $customerMessage)
+            : Helper::fail($gatewayParams, $errorCode, $reason, $logContext, $customerMessage);
 
         if (paystation_callback_is_ipn()) {
             paystation_callback_acknowledge($ipnStatus, $status);
@@ -499,30 +531,50 @@ if ($outcome['status'] === 'processing') {
     paystation_callback_finish($gatewayParams, $payload, 'Pending', $detail, $invoiceId, '');
 }
 
-// Nothing was applied. Either PayStation said no, or the verified transaction
-// did not match what this invoice asked for - which is a much more serious
-// condition, because money may well have left the customer's account.
-$detail['reason'] = 'PayStation reported trx_status "' . $outcome['status'] . '" for invoice_number '
-    . $invoiceNumber . ($outcome['reason'] !== '' ? ' (' . $outcome['reason'] . ')' : '')
-    . '. No payment was applied to invoice ' . $invoiceId . '.';
+// Nothing was applied. One of three things happened: the customer backed out of
+// the checkout, PayStation said no, or the verified transaction did not match
+// what this invoice asked for - which is much more serious, because money may
+// well have left the customer's account.
+$detail['reason'] = 'No payment was applied to invoice ' . $invoiceId . ' for invoice_number '
+    . $invoiceNumber . '. ' . ($outcome['reason'] !== ''
+        ? $outcome['reason']
+        : 'PayStation reported trx_status "' . $outcome['status'] . '".');
 
 $mismatched = in_array($outcome['status'], ['mismatch', 'orphaned'], true);
+
+// PayStation reports some abandoned checkouts as an outright failure, so the
+// browser's own word is accepted as a hint here. It changes nothing but the
+// wording: no payment is applied on either branch.
+$browserSaysCancel = paystation_callback_was_cancelled($payload);
+$cancelled = !$mismatched
+    && ($outcome['status'] === 'canceled' || ($outcome['status'] === 'failed' && $browserSaysCancel));
+
+if ($cancelled) {
+    // Which of the two signals called it a cancellation, so a merchant reading
+    // the log can see whether PayStation itself reported one.
+    $detail['browser_reported_cancel'] = $browserSaysCancel ? 'yes' : 'no';
+    $detail['paystation_reported_cancel'] = $outcome['status'] === 'canceled' ? 'yes' : 'no';
+}
 
 paystation_callback_finish(
     $gatewayParams,
     $payload,
-    $mismatched ? 'Verification Failed' : 'Unsuccessful',
+    $mismatched ? 'Verification Failed' : ($cancelled ? 'Cancelled' : 'Unsuccessful'),
     $detail,
     $invoiceId,
     '',
     200,
-    $mismatched ? 'PS-CB-MISMATCH' : 'PS-CB-DECLINED',
+    $mismatched ? 'PS-CB-MISMATCH' : ($cancelled ? 'PS-CB-CANCELLED' : 'PS-CB-DECLINED'),
     // $outcome['reason'] stays in the logs. It quotes the expected and received
     // amounts, the PayStation invoice number and the raw trx_status, which tell
     // a customer nothing useful and describe this install's internals.
     $mismatched
         ? 'This payment could not be matched to your invoice. Please do not pay again - contact '
             . 'support with the reference below and it will be sorted out.'
-        : 'PayStation did not complete this payment, and nothing has been charged to your invoice. '
-            . 'Please try again, or use another payment method.'
+        : ($cancelled
+            ? 'This payment was cancelled, so nothing has been charged. You can pay this invoice '
+                . 'whenever you are ready.'
+            : 'The payment was not completed and nothing has been charged. Please try again, or pay '
+                . 'with another method.'),
+    $cancelled ? 'notice' : 'error'
 );

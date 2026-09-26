@@ -421,14 +421,21 @@ function paystation_configError(array $params, $invoiceId, $code, $reason, $cust
 }
 
 /**
- * Render one failure: what happened, and how to find it in the logs.
+ * Render one outcome the customer needs to know about.
  *
- * The technical reason is added for a logged in admin only. Customers get the
- * plain explanation, the error code and the reference - never a log path, a
- * table name or a database message.
+ * This is a client area page, so it says what happened and what to do about it,
+ * and nothing more: one sentence, plus the error code and reference that let
+ * support find the rest. The operator facing reason and the log path are not
+ * rendered here for anybody - not even for an administrator, because an
+ * administrator viewing an invoice is looking at the same page the customer
+ * sees, and that is how absolute server paths ended up in a customer's browser.
+ * An admin gets a pointer to the Gateway Log instead, where the full reason is.
+ *
+ * A cancelled checkout is not a failure and is not dressed as one: no red box
+ * and no reference to quote, because there is nothing for support to look into.
  *
  * @param array $params
- * @param array $error  Output of Helper::fail().
+ * @param array $error  Output of Helper::fail() or Helper::cancelled().
  *
  * @return string HTML
  */
@@ -438,24 +445,25 @@ function paystation_errorBox(array $params, array $error)
         return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
     };
 
-    $html = '<div class="alert alert-danger" style="text-align:left">'
+    $isNotice = isset($error['level']) && $error['level'] === 'notice';
+
+    $html = '<div class="alert alert-' . ($isNotice ? 'info' : 'danger') . '" style="text-align:left">'
         . '<strong>' . $escape($error['message']) . '</strong>';
 
-    if (Helper::maySeeDetail($params)) {
-        if ($error['reason'] !== $error['message']) {
-            $html .= '<div style="margin-top:10px;font-family:monospace;font-size:12px;white-space:pre-wrap;'
-                . 'word-break:break-word">' . $escape($error['reason']) . '</div>';
-        }
-
-        $html .= '<div style="margin-top:10px;font-size:12px">Logged to <code>'
-            . $escape($error['log_file'] !== '' ? $error['log_file'] : 'gateway log only (no writable log directory)')
-            . '</code>, and to Billing &raquo; Gateway Log and Utilities &raquo; Logs &raquo; Activity Log.</div>';
+    if (!$isNotice) {
+        $html .= '<div style="margin-top:10px;font-size:12px;opacity:.85">Error code <code>'
+            . $escape($error['code']) . '</code> &middot; reference <code>' . $escape($error['reference'])
+            . '</code>. Quote this reference when contacting support.</div>';
     }
 
-    $html .= '<div style="margin-top:10px;font-size:12px;opacity:.85">Error code <code>'
-        . $escape($error['code']) . '</code> &middot; reference <code>' . $escape($error['reference'])
-        . '</code>. Quote this reference when contacting support.</div>'
-        . '</div>';
+    if (Helper::maySeeDetail($params)) {
+        $html .= '<div style="margin-top:10px;font-size:12px;opacity:.85">Administrator: the full reason is '
+            . 'in Billing &raquo; Gateway Log'
+            . ($isNotice ? '' : ' and Utilities &raquo; Logs &raquo; Activity Log')
+            . ', under reference <code>' . $escape($error['reference']) . '</code>.</div>';
+    }
+
+    $html .= '</div>';
 
     return $html;
 }

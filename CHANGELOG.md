@@ -36,6 +36,22 @@ a **major** bump means a breaking change to the gateway configuration fields, th
 
 ### Fixed
 
+- **A cancelled checkout is no longer reported to the customer as a declined payment.** Backing out
+  at bKash, or closing the PayStation page, produced a red box headed *"PayStation did not complete
+  this payment"* with a `PS-CB-DECLINED` code and a support reference to quote — for something the
+  customer had just chosen to do, and which needed no support at all. `Helper::normaliseTrxStatus()`
+  was folding `cancel`/`cancelled`/`canceled` into `failed`, so the distinction was lost before
+  anything could act on it. Cancellation is now its own transaction state (`canceled`), reported as
+  `PS-CB-CANCELLED`: the customer gets a plain note that nothing was charged and the invoice is
+  still payable, the gateway log gets a `Cancelled` entry, and the activity log — where a merchant
+  looks for things needing attention — gets nothing. Because PayStation reports some abandoned
+  checkouts as a plain `failed`, the browser's own `status`/`trx_status` is accepted as a hint for
+  the *wording* only; whether a payment is applied is still decided solely by the server-to-server
+  status lookup, and neither branch applies one.
+- **The reason text no longer quotes this module's own vocabulary back at the merchant.** Log
+  entries said `trx_status "failed"` even when PayStation had said `Canceled`, because the
+  normalised value was being logged in place of the gateway's. PayStation's own spelling is now
+  carried through to the logs as well.
 - **An invoice that does not name its own currency is payable again.** `redirect.php` read
   `tblinvoices.currency` and aborted with `PS-CURRENCY` ("Could not resolve the currency code for
   tblcurrencies id 0") whenever that column was `0` — which WHMCS leaves it at on invoices created
@@ -54,8 +70,7 @@ a **major** bump means a breaking change to the gateway configuration fields, th
   wrong credentials, a missing conversion rate, an unreachable API, a declined wallet — look
   identical. `redirect.php` and the callback now return the customer to the invoice with the
   module's own message naming what the customer can act on, the error code and the reference.
-  The full technical reason goes to the logs, and is shown on the page only to a logged in admin —
-  see *Two audiences* under Security below.
+  The full technical reason goes to the logs only — see *Two audiences* under Security below.
 - Database exceptions in `Helper` are no longer silently swallowed. `ensureSchema()`,
   `createTransaction()`, `invoiceBalance()` and the lookup helpers all degraded to a bare `false`
   or `null`, which made a missing `CREATE` privilege indistinguishable from an ordinary empty
@@ -90,7 +105,14 @@ a **major** bump means a breaking change to the gateway configuration fields, th
   carries a customer message and an operator reason, and the two never substitute for one another.
   The reason — absolute log paths, database error text, `mod_paystation_transactions`, the
   PayStation endpoint and `status_code`, the PHP version, whether each credential is set — goes to
-  the three logs, and on screen only to a logged in WHMCS admin. Specifically:
+  the three logs and nowhere else. Specifically:
+  - **The technical reason and the log file path are no longer rendered in a browser at all**, for
+    any viewer. They were shown to a logged in WHMCS admin, which put lines such as `Logged to
+    /home/<account>/public_html/modules/gateways/paystation/logs/paystation-2026-09-26.log` in front
+    of paying customers: the pages that report a failure are client-area pages, a WHMCS admin
+    session can also be a client-area session, and *Login as Client* keeps it, so "the viewer is an
+    admin" cannot gate server detail. An admin now gets a line pointing at **Billing → Gateway Log**
+    and the reference; the reason is read from the logs.
   - `Verbose Gateway Log` no longer reveals the technical reason and the log file path on the page
     to whoever is viewing it. It is a logging switch; a merchant turning it on to diagnose a
     problem would otherwise have published server detail to every customer paying at the time.
