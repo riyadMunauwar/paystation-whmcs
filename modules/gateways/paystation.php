@@ -187,7 +187,28 @@ function paystation_link($params)
         );
     }
 
-    $currency = isset($params['currency']) ? (string) $params['currency'] : '';
+    $currency = trim(isset($params['currency']) ? (string) $params['currency'] : '');
+
+    if ($currency === '') {
+        // WHMCS passed no currency code, which happens when the invoice does
+        // not name one. Resolve it exactly as redirect.php will, so the
+        // summary shown here matches what the customer is actually charged.
+        $currencyLookup = Helper::resolveInvoiceCurrency($invoiceId);
+        $currency = $currencyLookup['code'];
+
+        if ($currency === '') {
+            return $failure . paystation_configError(
+                $params,
+                $invoiceId,
+                'PS-CURRENCY',
+                'No currency could be resolved for invoice ' . $invoiceId . '. WHMCS passed none, and '
+                    . 'the invoice, the client account, the default currency and tblcurrencies itself '
+                    . 'all came back empty: '
+                    . json_encode($currencyLookup['tried'], JSON_UNESCAPED_SLASHES) . '.',
+                'The currency on this invoice could not be resolved. Please contact support.'
+            );
+        }
+    }
 
     // The client id is signed into the token and re-checked against the invoice
     // owner in redirect.php, so resolve it from whichever key WHMCS supplied.

@@ -246,26 +246,33 @@ if ($invoice['status'] === 'Paid') {
     Helper::redirect(Helper::invoiceUrl($invoiceId));
 }
 
-$currency = '';
-$currencyLookupError = '';
-try {
-    $currency = (string) Capsule::table('tblcurrencies')
-        ->where('id', (int) $invoice['currency'])
-        ->value('code');
-} catch (\Exception $e) {
-    $currency = '';
-    $currencyLookupError = $e->getMessage();
-}
+// The invoice does not always name its own currency - tblinvoices.currency is
+// 0 on invoices WHMCS created without setting it - so fall back the way WHMCS
+// does: the client's currency, then the site default.
+$currencyLookup = Helper::resolveInvoiceCurrency($invoiceId, $invoice);
+$currency = $currencyLookup['code'];
 
 if ($currency === '') {
     paystation_redirect_abort(
         $gatewayParams,
         $invoiceId,
         'PS-CURRENCY',
-        'Could not resolve the currency code for tblcurrencies id ' . (int) $invoice['currency']
-            . ($currencyLookupError !== '' ? ': ' . $currencyLookupError : '.'),
-        ['currency_id' => (int) $invoice['currency'], 'db_error' => $currencyLookupError],
+        'Could not resolve a currency for invoice ' . $invoiceId . '. The invoice, the client account, '
+            . 'the default currency and tblcurrencies itself were all checked and none produced a code. '
+            . 'Add a currency under Configuration > System Settings > Currencies and set it on the client.',
+        $currencyLookup['tried'],
         'The currency on this invoice could not be resolved. Please contact support.'
+    );
+}
+
+if ($currencyLookup['source'] !== 'tblinvoices.currency') {
+    // Not a failure, but worth a line: the code chosen here decides whether a
+    // conversion rate is needed and what the invoice is credited with.
+    Helper::logToFile(
+        'PS-CURRENCY-FALLBACK',
+        'Invoice ' . $invoiceId . ' does not name a currency of its own; using ' . $currency
+            . ' from ' . $currencyLookup['source'] . '.',
+        array_merge(['invoice_id' => $invoiceId], $currencyLookup['tried'])
     );
 }
 

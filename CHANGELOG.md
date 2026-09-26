@@ -36,6 +36,18 @@ a **major** bump means a breaking change to the gateway configuration fields, th
 
 ### Fixed
 
+- **An invoice that does not name its own currency is payable again.** `redirect.php` read
+  `tblinvoices.currency` and aborted with `PS-CURRENCY` ("Could not resolve the currency code for
+  tblcurrencies id 0") whenever that column was `0` — which WHMCS leaves it at on invoices created
+  by code paths that never set it, and which is all there is to read on schemas without the column.
+  Every payment on such an invoice was impossible. The currency is now resolved the way WHMCS
+  itself bills the invoice: the invoice's own currency, then the owning client's, then the default
+  currency, then any currency row at all. Only an install with no usable `tblcurrencies` row still
+  fails, and the failure now lists what each lookup returned. Falling back is not an error but is
+  recorded as `PS-CURRENCY-FALLBACK` in the module log, naming the code used and its source.
+- `paystation_link()` no longer renders a button whose amount summary says *"Set a conversion rate
+  for  in the gateway configuration"* when WHMCS passes an empty currency: it resolves the currency
+  the same way `redirect.php` does, so the invoice page and the checkout always agree.
 - A failed payment no longer shows WHMCS's generic *"Unfortunately your payment attempt was not
   successful. Please try again or contact support."* That banner is WHMCS's own text for
   `viewinvoice.php?id=N&paymentfailed=true` and names no cause, which made every failure —
