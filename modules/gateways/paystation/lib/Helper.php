@@ -430,6 +430,166 @@ class Helper
     }
 
     /**
+     * Resolve the currency code an invoice is billed in.
+     *
+     * tblinvoices.currency cannot be trusted on its own: it is 0 on invoices
+     * written by code paths that never set it, on installs where the invoices
+     * predate the column, and on older schemas that have no such column at
+     * all. WHMCS itself then bills the invoice in the owning client's
+     * currency, so fall back to that, and to the site default after it. Only a
+     * database without a single usable tblcurrencies row yields no code.
+     *
+     * @param int   $invoiceId
+     * @param array $invoice   The tblinvoices row when the caller already read
+     *                         it, to save a query.
+     *
+     * @return array {
+     *     @var string $code   Currency code, '' when nothing resolved.
+     *     @var string $source Which lookup supplied the code.
+     *     @var array  $tried  What each lookup returned, for the logs.
+     * }
+     */
+    public static function resolveInvoiceCurrency($invoiceId, array $invoice = [])
+    {
+        $invoiceId = (int) $invoiceId;
+        $result = ['code' => '', 'source' => '', 'tried' => []];
+
+        // 1. The currency recorded on the invoice.
+        $currencyId = 0;
+
+        if (array_key_exists('currency', $invoice)) {
+            $currencyId = (int) $invoice['currency'];
+        } elseif ($invoice !== []) {
+            // The caller handed over the row and it carries no such column.
+            $result['tried']['invoice_currency'] = 'tblinvoices has no currency column';
+        } else {
+            try {
+                $currencyId = (int) Capsule::table('tblinvoices')
+                    ->where('id', $invoiceId)
+                    ->value('currency');
+            } catch (\Exception $e) {
+                self::noteException('resolveInvoiceCurrency:invoice', $e);
+                $result['tried']['invoice_currency'] = 'lookup failed: ' . $e->getMessage();
+            }
+        }
+
+        if ($currencyId > 0) {
+            $code = self::currencyCode($currencyId);
+            $result['tried']['invoice_currency'] = $code !== ''
+                ? ('id ' . $currencyId . ' => ' . $code)
+                : ('id ' . $currencyId . ' => no tblcurrencies row');
+
+            if ($code !== '') {
+                $result['code'] = $code;
+                $result['source'] = 'tblinvoices.currency';
+
+                return $result;
+            }
+        } elseif (!isset($result['tried']['invoice_currency'])) {
+            $result['tried']['invoice_currency'] = 'not set on the invoice (0)';
+        }
+
+        // 2. The currency of the account the invoice belongs to.
+        $userId = isset($invoice['userid']) ? (int) $invoice['userid'] : 0;
+
+        if ($userId <= 0) {
+            try {
+                $userId = (int) Capsule::table('tblinvoices')
+                    ->where('id', $invoiceId)
+                    ->value('userid');
+            } catch (\Exception $e) {
+                self::noteException('resolveInvoiceCurrency:owner', $e);
+            }
+        }
+
+        if ($userId > 0) {
+            $clientCurrencyId = 0;
+
+            try {
+                $clientCurrencyId = (int) Capsule::table('tblclients')
+                    ->where('id', $userId)
+                    ->value('currency');
+            } catch (\Exception $e) {
+                self::noteException('resolveInvoiceCurrency:client', $e);
+                $result['tried']['client_currency'] = 'lookup failed: ' . $e->getMessage();
+            }
+
+            if ($clientCurrencyId > 0) {
+                $code = self::currencyCode($clientCurrencyId);
+                $result['tried']['client_currency'] = $code !== ''
+                    ? ('id ' . $clientCurrencyId . ' => ' . $code)
+                    : ('id ' . $clientCurrencyId . ' => no tblcurrencies row');
+
+                if ($code !== '') {
+                    $result['code'] = $code;
+                    $result['source'] = 'tblclients.currency of client ' . $userId;
+
+                    return $result;
+                }
+            } elseif (!isset($result['tried']['client_currency'])) {
+                $result['tried']['client_currency'] = 'not set on client ' . $userId . ' (0)';
+            }
+        } else {
+            $result['tried']['client_currency'] = 'invoice owner unknown';
+        }
+
+        // 3. The site default currency, then whichever currency does exist.
+        foreach ([true, false] as $defaultOnly) {
+            $key = $defaultOnly ? 'default_currency' : 'first_currency';
+
+            try {
+                $query = Capsule::table('tblcurrencies');
+                if ($defaultOnly) {
+                    $query = $query->where('default', 1);
+                }
+
+                $code = strtoupper(trim((string) $query->orderBy('id')->value('code')));
+            } catch (\Exception $e) {
+                self::noteException('resolveInvoiceCurrency:' . $key, $e);
+                $result['tried'][$key] = 'lookup failed: ' . $e->getMessage();
+                continue;
+            }
+
+            $result['tried'][$key] = $code !== '' ? $code : 'none';
+
+            if ($code !== '') {
+                $result['code'] = $code;
+                $result['source'] = $defaultOnly
+                    ? 'the default currency'
+                    : 'the lowest-id currency in tblcurrencies, no default being flagged';
+
+                return $result;
+            }
+        }
+
+        return $result;
+    }
+
+    /**
+     * Currency code for one tblcurrencies id.
+     *
+     * @param int $currencyId
+     *
+     * @return string '' when the row is missing or unreadable.
+     */
+    protected static function currencyCode($currencyId)
+    {
+        if ((int) $currencyId <= 0) {
+            return '';
+        }
+
+        try {
+            return strtoupper(trim((string) Capsule::table('tblcurrencies')
+                ->where('id', (int) $currencyId)
+                ->value('code')));
+        } catch (\Exception $e) {
+            self::noteException('currencyCode', $e);
+
+            return '';
+        }
+    }
+
+    /**
      * Outstanding balance of an invoice in its own currency.
      *
      * @param int $invoiceId

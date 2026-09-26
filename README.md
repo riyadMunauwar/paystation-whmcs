@@ -201,6 +201,22 @@ For a BDT invoice with no surcharge configured (the default), all four are the s
 responses return decimal amounts, so this matches their behaviour; if your merchant account is
 provisioned to accept whole numbers only, keep BDT invoice totals integral.
 
+### Which currency an invoice is billed in
+
+`tblinvoices.currency` is the first choice, but WHMCS leaves it at `0` on invoices created by code
+paths that never set it, and older schemas have no such column at all. A `0` there is not an error,
+so the module resolves the currency the way WHMCS itself bills the invoice:
+
+1. `tblinvoices.currency` → `tblcurrencies.code`
+2. the currency of the client the invoice belongs to (`tblclients.currency`)
+3. the default currency (`tblcurrencies.default = 1`)
+4. whichever currency row exists, lowest id first
+
+Anything past step 1 is recorded as `PS-CURRENCY-FALLBACK` in the module log, naming the code used
+and where it came from. Only an install with no usable `tblcurrencies` row at all fails, as
+`PS-CURRENCY`. The resolved code decides whether a conversion rate is needed, so if the client is on
+a non-BDT currency, set **Conversion Rate** in the gateway configuration.
+
 ---
 
 ## Diagnosing a failure
@@ -250,7 +266,7 @@ unlike the gateway log, cannot be switched off.
 | `PS-NO-INVOICE` / `PS-INVOICE-MISSING` | No invoice id in the submission, or no such invoice. |
 | `PS-INVOICE-OWNER` | The invoice belongs to a different client. |
 | `PS-INVOICE-STATUS` | The invoice is Cancelled, Draft or Refunded. |
-| `PS-CURRENCY` | The invoice currency code could not be resolved. |
+| `PS-CURRENCY` | No currency could be resolved at all — the invoice, the client and the default currency were all empty. |
 | `PS-AMOUNT` | Nothing left to pay, or a non-BDT invoice with no conversion rate set. |
 | `PS-NO-PHONE` | The client has no phone number; PayStation requires `cust_phone`. |
 | `PS-TRANSPORT` | The request never reached PayStation (DNS, firewall, TLS, timeout). |
@@ -263,6 +279,7 @@ unlike the gateway log, cannot be switched off.
 | `PS-CB-MISMATCH` | Verified, but the amount or invoice number did not match — **manual review**. |
 | `PS-CB-ORPHANED` | The payment succeeded but its WHMCS invoice no longer exists. |
 | `PS-INTERNAL` | A swallowed database exception; the message names the operation that failed. |
+| `PS-CURRENCY-FALLBACK` | Not a failure — the invoice named no currency, so the client's or the default one was used. |
 | `PS-TRACE` | Not a failure — a full request/response trace, written only with verbose logging on. |
 
 ---
@@ -353,6 +370,11 @@ curl -X POST "https://api.paystation.com.bd/initiate-payment" \
 
 Use `https://sandbox.paystation.com.bd` instead if Sandbox Mode is ticked. A `status_code` of
 `"200"` plus a `payment_url` means the credentials and environment match.
+
+**`PS-CURRENCY`** — Nothing in the database named a currency for this invoice: not the invoice, not
+the client it belongs to, and no default currency. Add one under **Configuration → System Settings →
+Currencies** and set it on the client. An invoice whose own `currency` column is `0` is *not* this
+error — the module uses the client's currency and logs `PS-CURRENCY-FALLBACK` instead.
 
 **`PS-NO-CREDENTIALS`** — Merchant ID or password is blank in the gateway config.
 
