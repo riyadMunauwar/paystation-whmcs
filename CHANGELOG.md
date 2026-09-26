@@ -11,6 +11,16 @@ a **major** bump means a breaking change to the gateway configuration fields, th
 
 ### Added
 
+- **The reason a payment failed is now shown and logged.** Every failure path carries a stable
+  error code (`PS-DECLINED`, `PS-TOKEN-EXPIRED`, `PS-NO-PHONE`, …) and a short reference, and is
+  recorded in three places at once: a dated file under `modules/gateways/paystation/logs/`, the
+  WHMCS gateway log, and the WHMCS activity log. The file log is written unconditionally, so it
+  still exists when the gateway log has been switched off — previously the only record of a
+  failure. Merchant credentials are masked, and customer phone numbers, emails, names and
+  addresses are reduced to their shape.
+- Verbose Gateway Log now also mirrors the full initiate-payment request and response into the
+  module log file as a `PS-TRACE` entry.
+- A README section, *Diagnosing a failure*, documenting the three log sinks and every error code.
 - `modules/gateways/paystation/whmcs.json` module manifest. WHMCS 8.x/9.x reads this to build the
   gateway's entry under **Configuration → Apps & Integrations → Payments**; without it the module
   could be missing from that list even though the gateway file itself was valid. The release
@@ -26,6 +36,38 @@ a **major** bump means a breaking change to the gateway configuration fields, th
 
 ### Fixed
 
+- A failed payment no longer shows WHMCS's generic *"Unfortunately your payment attempt was not
+  successful. Please try again or contact support."* That banner is WHMCS's own text for
+  `viewinvoice.php?id=N&paymentfailed=true` and names no cause, which made every failure —
+  wrong credentials, a missing conversion rate, an unreachable API, a declined wallet — look
+  identical. `redirect.php` and the callback now return the customer to the invoice with the
+  module's own message naming the actual cause, the error code and the reference. Admins, and
+  anyone viewing with Verbose Gateway Log enabled, additionally see the full technical reason and
+  the log file path on the page itself.
+- Database exceptions in `Helper` are no longer silently swallowed. `ensureSchema()`,
+  `createTransaction()`, `invoiceBalance()` and the lookup helpers all degraded to a bare `false`
+  or `null`, which made a missing `CREATE` privilege indistinguishable from an ordinary empty
+  result; the message is now captured, logged as `PS-INTERNAL`, and surfaced in the failure that
+  follows.
+- `redirect.php` now fails fast, and says so, when the ledger table cannot be created or the PHP
+  cURL extension is missing, rather than proceeding to a call that cannot work. `paystation_link()`
+  makes the same checks before rendering a button, and also catches an unset WHMCS System URL,
+  which silently produced an unusable form action.
+- The callback's failure paths now explain themselves too, and distinguish a genuine decline
+  (`PS-CB-DECLINED`) from an unverified payment (`PS-CB-UNVERIFIED`) and from a verified payment
+  that did not match the invoice (`PS-CB-MISMATCH`) — the last two tell the customer explicitly not
+  to pay again.
+- The callback endpoint now answers PayStation's Merchant IPN with an HTTP 2xx JSON
+  acknowledgement instead of a `302` redirect. PayStation treats any non-2xx response as a failed
+  delivery and retries, so pointing the merchant IPN URL at this file previously produced an
+  endless retry loop even though every notification had in fact been processed. A browser coming
+  back from the hosted checkout is still redirected to its invoice; the two are told apart by the
+  IPN's `POST` + `application/json` request shape. Conditions a retry could genuinely resolve —
+  unconfigured credentials, and a failed status lookup — answer `503` so the retry still happens.
+- `paystation_link()` no longer renders a Pay Now button when the client has no usable phone
+  number. PayStation requires `cust_phone`, so `redirect.php` aborted on it, and the customer was
+  bounced straight back to the invoice with WHMCS's generic "your payment attempt was not
+  successful" message and no indication of what to fix. The invoice now explains it up front.
 - `redirect.php` now aborts with a clear gateway-log entry when the Merchant ID or password is
   blank, instead of generating a PayStation invoice number and posting a request that cannot
   authenticate. The callback already made this check.

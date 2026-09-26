@@ -41,6 +41,18 @@ class Helper
     /** Pending transactions older than this are abandoned. */
     const RECONCILE_MAX_AGE = 259200;
 
+    /** Session key holding the most recent customer facing failure. */
+    const ERROR_SESSION_KEY = 'paystation_last_error';
+
+    /** Query string flag that asks the invoice page to render that failure. */
+    const ERROR_QUERY_KEY = 'paystationerror';
+
+    /** How long a stored failure is still shown on the invoice, in seconds. */
+    const ERROR_TTL = 1800;
+
+    /** @var string Message of the last swallowed internal exception. */
+    protected static $lastInternalError = '';
+
     /**
      * Make sure the WHMCS gateway helper functions are loaded.
      *
@@ -105,6 +117,7 @@ class Helper
             }
             $ready = true;
         } catch (\Exception $e) {
+            self::noteException('Create ' . self::TABLE, $e);
             $ready = false;
         }
 
@@ -310,6 +323,38 @@ class Helper
     }
 
     /**
+     * Reduce a WHMCS stored phone number to the digits PayStation expects.
+     *
+     * WHMCS stores numbers such as "+880.1712345678"; PayStation expects a
+     * local Bangladeshi format such as "01712345678".
+     *
+     * Lives here rather than in redirect.php so the payment button can apply
+     * exactly the same test before it is rendered.
+     *
+     * @param string $phone
+     *
+     * @return string Empty when nothing usable remains.
+     */
+    public static function normalisePhone($phone)
+    {
+        $digits = preg_replace('/\D+/', '', (string) $phone);
+
+        if ($digits === '') {
+            return '';
+        }
+
+        // Strip the Bangladesh country code when a local number follows it.
+        if (strpos($digits, '880') === 0 && strlen($digits) > 11) {
+            $digits = substr($digits, 3);
+        }
+        if (strlen($digits) === 10 && strpos($digits, '1') === 0) {
+            $digits = '0' . $digits;
+        }
+
+        return $digits;
+    }
+
+    /**
      * Work out what to charge at PayStation and what to credit in WHMCS.
      *
      * WHMCS is always credited with the invoice-currency balance. Any merchant
@@ -408,6 +453,7 @@ class Helper
 
             return round($total - ($received - $refunded), 2);
         } catch (\Exception $e) {
+            self::noteException('invoiceBalance', $e);
             return 0.0;
         }
     }
@@ -428,6 +474,7 @@ class Helper
         try {
             return Capsule::table(self::TABLE)->where('invoice_number', (string) $invoiceNumber)->exists();
         } catch (\Exception $e) {
+            self::noteException('invoiceNumberExists', $e);
             return false;
         }
     }
@@ -454,6 +501,7 @@ class Helper
 
             return true;
         } catch (\Exception $e) {
+            self::noteException('createTransaction', $e);
             return false;
         }
     }
@@ -481,6 +529,7 @@ class Helper
 
             return true;
         } catch (\Exception $e) {
+            self::noteException('updateTransaction', $e);
             return false;
         }
     }
@@ -501,6 +550,7 @@ class Helper
         try {
             $row = Capsule::table(self::TABLE)->where('invoice_number', (string) $invoiceNumber)->first();
         } catch (\Exception $e) {
+            self::noteException('findTransaction', $e);
             return null;
         }
 
@@ -523,6 +573,7 @@ class Helper
         try {
             $row = Capsule::table(self::TABLE)->where('trx_id', (string) $trxId)->first();
         } catch (\Exception $e) {
+            self::noteException('findTransactionByTrxId', $e);
             return null;
         }
 
@@ -549,6 +600,7 @@ class Helper
         try {
             return Capsule::table('tblaccounts')->where('transid', (string) $trxId)->exists();
         } catch (\Exception $e) {
+            self::noteException('paymentAlreadyRecorded', $e);
             return false;
         }
     }
@@ -760,6 +812,7 @@ class Helper
         try {
             return Capsule::table('tblinvoices')->where('id', (int) $invoiceId)->exists();
         } catch (\Exception $e) {
+            self::noteException('invoiceExists', $e);
             return false;
         }
     }
@@ -804,6 +857,7 @@ class Helper
                 ->limit((int) $limit)
                 ->get();
         } catch (\Exception $e) {
+            self::noteException('reconcilePending query', $e);
             return $summary;
         }
 
@@ -856,10 +910,587 @@ class Helper
                     'updated_at' => date('Y-m-d H:i:s'),
                 ]);
         } catch (\Exception $e) {
+            self::noteException('reconcilePending abandon', $e);
             // Non fatal.
         }
 
         return $summary;
+    }
+
+    // -----------------------------------------------------------------------
+    // Diagnostics
+    //
+    // Every failure in this module ends up in three places, because any one of
+    // them can be unavailable when a merchant needs it:
+    //
+    //   1. A dated file under modules/gateways/paystation/logs/. Always
+    //      written, so it survives the WHMCS gateway log being switched off.
+    //   2. The WHMCS gateway log (Billing > Gateway Log), with full context.
+    //   3. The WHMCS activity log, as a single grep-able line carrying the
+    //      error code, reference and log file path.
+    //
+    // The same failure is also stashed in the session so the invoice page can
+    // tell the customer what actually went wrong instead of falling back to
+    // the generic WHMCS "your payment attempt was not successful" banner.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Record an exception that the caller is about to swallow.
+     *
+     * The database and schema helpers below all degrade gracefully on failure,
+     * which used to make a broken table or a missing privilege indistinguishable
+     * from an ordinary "nothing found". The message is kept so the calling code
+     * can report it, and written to the module log immediately so it is never
+     * lost even if the caller does not.
+     *
+     * @param string     $where Short label of the operation that failed.
+     * @param \Exception $e
+     *
+     * @return string The recorded message.
+     */
+    public static function noteException($where, $e)
+    {
+        $message = $where . ': ' . $e->getMessage();
+        self::$lastInternalError = $message;
+
+        self::logToFile('PS-INTERNAL', $message, [
+            'exception' => get_class($e),
+            'file' => $e->getFile() . ':' . $e->getLine(),
+        ]);
+
+        return $message;
+    }
+
+    /**
+     * Message of the most recent swallowed exception, if any.
+     *
+     * @return string
+     */
+    public static function lastInternalError()
+    {
+        return self::$lastInternalError;
+    }
+
+    /**
+     * Writable directory for the module's own log files.
+     *
+     * Prefers a logs/ directory beside the module so the merchant can find it
+     * next to the code, and falls back to the system temp directory when the
+     * module directory is read only (a common hardening measure).
+     *
+     * @return string Empty when nothing is writable.
+     */
+    public static function logDir()
+    {
+        static $dir = null;
+
+        if ($dir !== null) {
+            return $dir;
+        }
+
+        $candidates = [__DIR__ . '/../logs'];
+        if (function_exists('sys_get_temp_dir')) {
+            $candidates[] = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'paystation-whmcs-logs';
+        }
+
+        foreach ($candidates as $candidate) {
+            if (!is_dir($candidate)) {
+                @mkdir($candidate, 0755, true);
+            }
+
+            if (is_dir($candidate) && is_writable($candidate)) {
+                self::protectLogDir($candidate);
+
+                $resolved = realpath($candidate);
+
+                return $dir = rtrim($resolved === false ? $candidate : $resolved, '/\\');
+            }
+        }
+
+        return $dir = '';
+    }
+
+    /**
+     * Keep the log directory from being served over HTTP.
+     *
+     * Apache honours the .htaccess; the index.php stops a directory listing
+     * anywhere. Log contents are masked regardless, because neither guard
+     * helps on an nginx front end.
+     *
+     * @param string $dir
+     *
+     * @return void
+     */
+    protected static function protectLogDir($dir)
+    {
+        $guards = [
+            '.htaccess' => "<IfModule mod_authz_core.c>\n    Require all denied\n</IfModule>\n"
+                . "<IfModule !mod_authz_core.c>\n    Order allow,deny\n    Deny from all\n</IfModule>\n",
+            'index.php' => "<?php exit;\n",
+        ];
+
+        foreach ($guards as $name => $contents) {
+            $path = $dir . DIRECTORY_SEPARATOR . $name;
+            if (!file_exists($path)) {
+                @file_put_contents($path, $contents);
+            }
+        }
+    }
+
+    /**
+     * Path of today's module log file.
+     *
+     * @return string Empty when no directory is writable.
+     */
+    public static function logFilePath()
+    {
+        $dir = self::logDir();
+
+        if ($dir === '') {
+            return '';
+        }
+
+        return $dir . DIRECTORY_SEPARATOR . 'paystation-' . gmdate('Y-m-d') . '.log';
+    }
+
+    /**
+     * Append a masked, human readable entry to the module log file.
+     *
+     * Unlike Helper::log() this does not depend on WHMCS at all, so it still
+     * works when the gateway log is disabled or when the failure happened
+     * before WHMCS finished booting.
+     *
+     * @param string $code    Stable error code, e.g. PS-DECLINED.
+     * @param string $reason  Operator facing explanation.
+     * @param array  $context Extra detail. reference/invoice_id get promoted
+     *                        into the header line.
+     *
+     * @return string Path written, or empty string on failure.
+     */
+    public static function logToFile($code, $reason, array $context = [])
+    {
+        $path = self::logFilePath();
+
+        if ($path === '') {
+            return '';
+        }
+
+        $reference = isset($context['reference']) ? (string) $context['reference'] : '';
+        $invoiceId = isset($context['invoice_id']) ? (int) $context['invoice_id'] : 0;
+        unset($context['reference'], $context['invoice_id']);
+
+        $lines = [
+            '[' . gmdate('Y-m-d H:i:s') . ' UTC] ' . $code
+                . ($reference !== '' ? '  ref=' . $reference : '')
+                . ($invoiceId > 0 ? '  invoice=' . $invoiceId : ''),
+            '    reason: ' . self::flattenForLog($reason),
+        ];
+
+        foreach (self::maskPii(self::maskSecrets($context)) as $key => $value) {
+            $lines[] = '    ' . $key . ': ' . self::flattenForLog($value);
+        }
+
+        $lines[] = '    source: ' . (isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : 'cli')
+            . '  ip=' . (isset($_SERVER['REMOTE_ADDR']) ? (string) $_SERVER['REMOTE_ADDR'] : '-');
+        $lines[] = str_repeat('-', 74);
+
+        $written = @file_put_contents($path, implode(PHP_EOL, $lines) . PHP_EOL, FILE_APPEND | LOCK_EX);
+
+        return $written === false ? '' : $path;
+    }
+
+    /**
+     * Render one log value on a single line.
+     *
+     * @param mixed $value
+     *
+     * @return string
+     */
+    protected static function flattenForLog($value)
+    {
+        if (is_array($value)) {
+            $encoded = json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
+            return $encoded === false ? '[unencodable]' : $encoded;
+        }
+
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+
+        if ($value === null) {
+            return 'null';
+        }
+
+        return trim(preg_replace('/\s+/', ' ', (string) $value));
+    }
+
+    /**
+     * Blur customer detail that does not need to be readable in a log file.
+     *
+     * Phone numbers keep their length and last four digits, because those are
+     * exactly what is needed to debug a rejected cust_phone.
+     *
+     * @param mixed $data
+     *
+     * @return mixed
+     */
+    public static function maskPii($data)
+    {
+        if (!is_array($data)) {
+            return $data;
+        }
+
+        $phoneKeys = ['cust_phone', 'phonenumber', 'phone', 'payer_mobile', 'payer_mobile_no'];
+        $emailKeys = ['cust_email', 'email'];
+        $freeTextKeys = ['cust_address', 'address1', 'address2', 'cust_name'];
+
+        foreach ($data as $key => $value) {
+            if (is_array($value)) {
+                $data[$key] = self::maskPii($value);
+                continue;
+            }
+
+            $lower = strtolower((string) $key);
+            $value = (string) $value;
+
+            if ($value === '') {
+                continue;
+            }
+
+            if (in_array($lower, $phoneKeys, true)) {
+                $digits = preg_replace('/\D+/', '', $value);
+                $data[$key] = '***' . substr($digits, -4) . ' (' . strlen($digits) . ' digits)';
+                continue;
+            }
+
+            if (in_array($lower, $emailKeys, true)) {
+                $at = strrpos($value, '@');
+                $data[$key] = $at === false
+                    ? substr($value, 0, 1) . '***'
+                    : substr($value, 0, 1) . '***' . substr($value, $at);
+                continue;
+            }
+
+            if (in_array($lower, $freeTextKeys, true)) {
+                $data[$key] = substr($value, 0, 1) . '*** (' . strlen($value) . ' chars)';
+            }
+        }
+
+        return $data;
+    }
+
+    /**
+     * Write a single line to the WHMCS activity log.
+     *
+     * The activity log cannot be switched off, so this is the one sink that is
+     * guaranteed to be there when a merchant goes looking.
+     *
+     * @param string $message
+     *
+     * @return void
+     */
+    public static function logActivityLine($message)
+    {
+        if (!function_exists('logActivity')) {
+            return;
+        }
+
+        try {
+            logActivity($message);
+        } catch (\Exception $e) {
+            // Logging must never break a payment flow.
+        }
+    }
+
+    /**
+     * Short reference that ties an on screen error to its log entries.
+     *
+     * @return string
+     */
+    public static function errorReference()
+    {
+        return 'PS' . strtoupper(substr(md5(uniqid('', true) . mt_rand()), 0, 8));
+    }
+
+    /**
+     * Record a failure everywhere it needs to be recorded.
+     *
+     * @param array  $gatewayParams
+     * @param string $code            Stable error code, e.g. PS-DECLINED.
+     * @param string $reason          Operator facing explanation. Logged in
+     *                                full, and shown on screen to admins or
+     *                                when verbose logging is enabled.
+     * @param array  $context         Extra detail for the logs. An invoice_id
+     *                                key binds the error to that invoice page.
+     * @param string $customerMessage What the customer is told. Defaults to
+     *                                $reason when no safer wording is given.
+     *
+     * @return array The stored error entry.
+     */
+    public static function fail(array $gatewayParams, $code, $reason, array $context = [], $customerMessage = '')
+    {
+        $reference = self::errorReference();
+        $invoiceId = isset($context['invoice_id']) ? (int) $context['invoice_id'] : 0;
+
+        $logPath = self::logToFile($code, $reason, array_merge([
+            'reference' => $reference,
+            'invoice_id' => $invoiceId,
+        ], $context));
+
+        self::log($gatewayParams, array_merge([
+            'error_code' => $code,
+            'error_reference' => $reference,
+            'reason' => $reason,
+            'log_file' => $logPath !== '' ? $logPath : 'no writable log directory',
+        ], $context), 'Unsuccessful');
+
+        self::logActivityLine(
+            'PayStation ' . $code . ' [' . $reference . ']'
+            . ($invoiceId > 0 ? ' invoice ' . $invoiceId : '')
+            . ': ' . self::flattenForLog($reason)
+            . ($logPath !== '' ? ' (detail: ' . $logPath . ')' : '')
+        );
+
+        $error = [
+            'code' => (string) $code,
+            'reference' => $reference,
+            'reason' => (string) $reason,
+            'message' => $customerMessage !== '' ? (string) $customerMessage : (string) $reason,
+            'invoice_id' => $invoiceId,
+            'log_file' => $logPath,
+            'time' => time(),
+        ];
+
+        self::storeError($error);
+
+        return $error;
+    }
+
+    /**
+     * Record a failure, but no more than once per throttle window.
+     *
+     * The invoice page re-renders the payment button on every view, so a
+     * standing misconfiguration would otherwise write a log line each time the
+     * customer refreshes. The first occurrence is logged in full; repeats
+     * within the window reuse that entry, keeping the same reference so the
+     * message on screen always points at a log line that exists.
+     *
+     * @param array  $gatewayParams
+     * @param string $code
+     * @param string $reason
+     * @param array  $context
+     * @param string $customerMessage
+     * @param int    $seconds Throttle window.
+     *
+     * @return array The stored error entry.
+     */
+    public static function failOnce(
+        array $gatewayParams,
+        $code,
+        $reason,
+        array $context = [],
+        $customerMessage = '',
+        $seconds = 3600
+    ) {
+        $invoiceId = isset($context['invoice_id']) ? (int) $context['invoice_id'] : 0;
+        $key = $code . '|' . $invoiceId;
+        $now = time();
+
+        if (self::startSession()) {
+            $seen = isset($_SESSION['paystation_reported']) && is_array($_SESSION['paystation_reported'])
+                ? $_SESSION['paystation_reported']
+                : [];
+
+            foreach ($seen as $seenKey => $entry) {
+                if (!is_array($entry) || $now - (int) $entry['time'] > $seconds) {
+                    unset($seen[$seenKey]);
+                }
+            }
+
+            if (isset($seen[$key])) {
+                $_SESSION['paystation_reported'] = $seen;
+
+                return $seen[$key];
+            }
+
+            $error = self::fail($gatewayParams, $code, $reason, $context, $customerMessage);
+            $seen[$key] = $error;
+            $_SESSION['paystation_reported'] = $seen;
+
+            return $error;
+        }
+
+        return self::fail($gatewayParams, $code, $reason, $context, $customerMessage);
+    }
+
+    /**
+     * Make sure a PHP session is available for the error hand off.
+     *
+     * @return bool
+     */
+    protected static function startSession()
+    {
+        if (function_exists('session_status') && session_status() === PHP_SESSION_ACTIVE) {
+            return true;
+        }
+
+        if (session_id() !== '') {
+            return true;
+        }
+
+        if (headers_sent()) {
+            return false;
+        }
+
+        return (bool) @session_start();
+    }
+
+    /**
+     * Hand a failure to the next page load.
+     *
+     * @param array $error
+     *
+     * @return void
+     */
+    public static function storeError(array $error)
+    {
+        if (!self::startSession()) {
+            return;
+        }
+
+        $_SESSION[self::ERROR_SESSION_KEY] = $error;
+    }
+
+    /**
+     * The failure waiting to be shown for an invoice, if it is still fresh.
+     *
+     * @param int $invoiceId
+     *
+     * @return array|null
+     */
+    public static function pendingError($invoiceId)
+    {
+        if (!self::startSession() || empty($_SESSION[self::ERROR_SESSION_KEY])) {
+            return null;
+        }
+
+        $error = $_SESSION[self::ERROR_SESSION_KEY];
+
+        if (!is_array($error) || empty($error['code'])) {
+            self::clearError();
+
+            return null;
+        }
+
+        if (time() - (int) $error['time'] > self::ERROR_TTL) {
+            self::clearError();
+
+            return null;
+        }
+
+        $storedInvoiceId = isset($error['invoice_id']) ? (int) $error['invoice_id'] : 0;
+        if ($storedInvoiceId > 0 && $storedInvoiceId !== (int) $invoiceId) {
+            return null;
+        }
+
+        return $error;
+    }
+
+    /**
+     * Drop any stored failure.
+     *
+     * @return void
+     */
+    public static function clearError()
+    {
+        if (!self::startSession()) {
+            return;
+        }
+
+        unset($_SESSION[self::ERROR_SESSION_KEY]);
+    }
+
+    /**
+     * True when the current viewer may be shown the technical reason.
+     *
+     * @param array $gatewayParams
+     *
+     * @return bool
+     */
+    public static function maySeeDetail(array $gatewayParams)
+    {
+        if (!empty($gatewayParams['debugLogging'])) {
+            return true;
+        }
+
+        if (!self::startSession()) {
+            return false;
+        }
+
+        return !empty($_SESSION['adminid']);
+    }
+
+    /**
+     * Invoice URL carrying the flag that asks for a stored error to be shown.
+     *
+     * @param int   $invoiceId
+     * @param array $error Output of Helper::fail().
+     *
+     * @return string
+     */
+    public static function invoiceErrorUrl($invoiceId, array $error)
+    {
+        $reference = isset($error['reference']) ? (string) $error['reference'] : '1';
+
+        return self::invoiceUrl($invoiceId) . '&' . self::ERROR_QUERY_KEY . '=' . urlencode($reference);
+    }
+
+    /**
+     * Standalone error page, for failures with no invoice to return to.
+     *
+     * @param array $error      Output of Helper::fail().
+     * @param bool  $showDetail Include the technical reason.
+     * @param int   $httpStatus
+     *
+     * @return void
+     */
+    public static function renderErrorPage(array $error, $showDetail = false, $httpStatus = 400)
+    {
+        if (!headers_sent()) {
+            http_response_code((int) $httpStatus);
+            header('Content-Type: text/html; charset=utf-8');
+        }
+
+        $escape = function ($value) {
+            return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+        };
+
+        echo '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            . '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            . '<title>PayStation payment could not be started</title>'
+            . '<style>body{font:14px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:40px 20px;'
+            . 'background:#f6f7f9;color:#1f2933}main{max-width:640px;margin:0 auto;background:#fff;border:1px solid #e1e5ea;'
+            . 'border-radius:8px;padding:24px}h1{font-size:19px;margin:0 0 12px}code{background:#f0f2f5;padding:1px 5px;'
+            . 'border-radius:3px}pre{background:#f0f2f5;padding:12px;border-radius:4px;white-space:pre-wrap;'
+            . 'word-break:break-word;margin:12px 0 0}.ref{color:#6b7684;font-size:12px;margin-top:16px}</style>'
+            . '</head><body><main>'
+            . '<h1>The PayStation payment could not be started</h1>'
+            . '<p>' . $escape($error['message']) . '</p>';
+
+        if ($showDetail && $error['reason'] !== $error['message']) {
+            echo '<pre>' . $escape($error['reason']) . '</pre>';
+        }
+
+        if ($showDetail && !empty($error['log_file'])) {
+            echo '<p class="ref">Logged to <code>' . $escape($error['log_file']) . '</code></p>';
+        }
+
+        echo '<p class="ref">Error code <code>' . $escape($error['code']) . '</code> &middot; reference <code>'
+            . $escape($error['reference']) . '</code>. Quote this reference to support.</p>'
+            . '</main></body></html>';
+
+        exit;
     }
 
     /**

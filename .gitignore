@@ -54,3 +54,8 @@ nbproject/
 Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
+
+# ---------------------------------------------------------------------------
+# PayStation module diagnostics (created at runtime, never committed)
+# ---------------------------------------------------------------------------
+/modules/gateways/paystation/logs/

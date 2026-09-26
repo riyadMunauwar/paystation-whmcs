@@ -25,6 +25,7 @@ modules/gateways/paystation/lib/loader.php          Class bootstrap
 modules/gateways/paystation/lib/Api.php             PayStation REST client
 modules/gateways/paystation/lib/Helper.php          Ledger, amounts, tokens, settlement
 modules/gateways/callback/paystation.php            Return-URL handler + verification
+modules/gateways/paystation/logs/                   Failure log, created automatically at runtime
 includes/hooks/paystation_reconcile.php             Cron reconciliation of abandoned checkouts
 ```
 
@@ -111,6 +112,25 @@ Invoice page                 paystation_link()
 If the customer never returns, `includes/hooks/paystation_reconcile.php` performs the same
 verification on the next cron run.
 
+### Merchant IPN (optional)
+
+The callback file doubles as a PayStation Merchant IPN receiver, so you can give PayStation the
+same URL as your IPN URL:
+
+```
+https://your-whmcs-install.example/modules/gateways/callback/paystation.php
+```
+
+An IPN is a server-to-server `POST` with a JSON body rather than a browser redirect, and is told
+apart from a returning customer by that request shape. It is verified against the Transaction
+Status API exactly like a browser callback — the notification itself is never trusted — and then
+answered with an HTTP `200` JSON acknowledgement instead of a redirect. PayStation retries any
+non-2xx response, so unconfigured credentials and a failed status lookup answer `503` to keep the
+retry useful, while every settled outcome (including a genuinely failed payment) answers `200`.
+
+Configuring the IPN is optional: the browser callback and cron reconciliation already settle every
+payment between them. It mainly shortens the delay on payments the customer abandons after paying.
+
 ---
 
 ## Invoice numbers
@@ -183,6 +203,70 @@ provisioned to accept whole numbers only, keep BDT invoice totals integral.
 
 ---
 
+## Diagnosing a failure
+
+Every failure in this module is recorded in three places and shown on screen, so a payment that
+does not go through never leaves you guessing.
+
+**On the invoice page.** Instead of WHMCS's generic *"Unfortunately your payment attempt was not
+successful"*, the module renders its own message naming the actual cause, an **error code** such as
+`PS-DECLINED`, and a **reference** such as `PS9F2A41C7`. Customers see the plain explanation; an
+admin, or anyone viewing while **Verbose Gateway Log** is enabled, additionally sees the full
+technical reason and the path of the log file.
+
+**In `modules/gateways/paystation/logs/paystation-YYYY-MM-DD.log`.** Written on every failure,
+regardless of whether the WHMCS gateway log is enabled, and the first place to look:
+
+```
+[2026-02-14 09:31:07 UTC] PS-DECLINED  ref=PS9F2A41C7  invoice=1043
+    reason: PayStation rejected the checkout request at https://api.paystation.com.bd/initiate-payment
+            with status_code "2001" and status "failed": Invalid Credential [HTTP 200] - status_code
+            2001 means the Merchant ID or Merchant Password is wrong for this environment.
+    endpoint: https://api.paystation.com.bd/initiate-payment
+    request: {"invoice_number":"1043-1739525467","cust_phone":"***5133 (11 digits)", ...}
+    response: {"status_code":"2001","status":"failed","message":"Invalid Credential"}
+```
+
+Credentials are masked, and customer phone numbers, emails, names and addresses are reduced to
+their shape. The directory is created on first use with an `.htaccess` and an `index.php` that deny
+web access; on nginx, add an equivalent `location` deny rule.
+
+**In the WHMCS logs.** The full context goes to **Billing → Gateway Log**, and a one-line summary
+carrying the code, reference and log file path goes to **Utilities → Logs → Activity Log** — which,
+unlike the gateway log, cannot be switched off.
+
+### Error codes
+
+| Code | What it means |
+|---|---|
+| `PS-NOT-ACTIVATED` | The gateway module is not activated in WHMCS. |
+| `PS-NO-CREDENTIALS` | Merchant ID or Merchant Password is blank. |
+| `PS-NO-SYSTEM-URL` | WHMCS System URL is unset, so the form and callback URLs cannot be built. |
+| `PS-NO-CURL` | The PHP cURL extension is not loaded on this server. |
+| `PS-DB-SCHEMA` | `mod_paystation_transactions` is missing and could not be created. |
+| `PS-DB-WRITE` / `PS-DB-READ` | The ledger row or the invoice/client row could not be written or read. |
+| `PS-TOKEN-EXPIRED` | The invoice page sat open longer than 30 minutes before Pay Now. |
+| `PS-TOKEN-INVALID` | The signed Pay Now token did not verify (credentials changed, or a forged post). |
+| `PS-NO-INVOICE` / `PS-INVOICE-MISSING` | No invoice id in the submission, or no such invoice. |
+| `PS-INVOICE-OWNER` | The invoice belongs to a different client. |
+| `PS-INVOICE-STATUS` | The invoice is Cancelled, Draft or Refunded. |
+| `PS-CURRENCY` | The invoice currency code could not be resolved. |
+| `PS-AMOUNT` | Nothing left to pay, or a non-BDT invoice with no conversion rate set. |
+| `PS-NO-PHONE` | The client has no phone number; PayStation requires `cust_phone`. |
+| `PS-TRANSPORT` | The request never reached PayStation (DNS, firewall, TLS, timeout). |
+| `PS-DECLINED` | PayStation answered with a rejection; its own message is included. |
+| `PS-NO-URL` | PayStation accepted the request but returned no `payment_url`. |
+| `PS-BAD-URL` | The returned checkout URL was not HTTPS on a `paystation.com.bd` host. |
+| `PS-CB-NO-MATCH` | A callback arrived that matches no local transaction. |
+| `PS-CB-UNVERIFIED` | The status lookup failed; cron will retry, so do not pay again. |
+| `PS-CB-DECLINED` | PayStation reported the payment did not succeed. |
+| `PS-CB-MISMATCH` | Verified, but the amount or invoice number did not match — **manual review**. |
+| `PS-CB-ORPHANED` | The payment succeeded but its WHMCS invoice no longer exists. |
+| `PS-INTERNAL` | A swallowed database exception; the message names the operation that failed. |
+| `PS-TRACE` | Not a failure — a full request/response trace, written only with verbose logging on. |
+
+---
+
 ## Gateway log
 
 Everything lands under **Billing → Gateway Log**, keyed by context:
@@ -242,13 +326,44 @@ WHMCS never looks at. Also confirm `modules/gateways/paystation/whmcs.json` was 
 8.x/9.x uses that manifest to build the entry under **Apps & Integrations → Payments**. Clear any
 PHP opcode cache after uploading.
 
-**"PayStation is not fully configured"** — Merchant ID or password is blank in the gateway config.
+**"Unfortunately your payment attempt was not successful"** — That is WHMCS's own generic text for
+`viewinvoice.php?id=N&paymentfailed=true`, and it says nothing about the cause. This module no
+longer uses that redirect: it returns you to the invoice with its own message naming the real
+reason, plus an error code and reference. If you are still seeing WHMCS's wording, either an older
+copy of the module is installed, or the failed payment came from a *different* gateway.
 
-**"Invalid or expired payment token"** — The invoice page sat open longer than 30 minutes. Reload
-the invoice and click Pay Now again.
+To see the full technical reason on the page itself, tick **Verbose Gateway Log** in the gateway
+configuration, or reproduce the failure while logged in as an admin. Either way the detail is in
+`modules/gateways/paystation/logs/paystation-YYYY-MM-DD.log` — see
+[Diagnosing a failure](#diagnosing-a-failure) for the error-code table. If the failure happened
+*immediately* on clicking Pay Now, the PayStation checkout was never reached and the entry comes
+from `redirect.php`; if it happened after returning from PayStation, it comes from the callback.
 
-**Client has no usable phone number** — PayStation requires `cust_phone`. Add a phone number to
-the client's profile.
+**`status_code 1001` / "Invalid Credential" on initiate-payment** — The credentials belong to the
+other environment. Sandbox and production credentials are not interchangeable, and the endpoint is
+chosen solely by the **Sandbox Mode** checkbox. You can confirm a credential pair outside WHMCS:
+
+```bash
+curl -X POST "https://api.paystation.com.bd/initiate-payment" \
+  -d "merchantId=YOUR_ID" -d "password=YOUR_PASSWORD" \
+  -d "invoice_number=test-$(date +%s)" -d "currency=BDT" -d "payment_amount=10" \
+  -d "cust_name=Test" -d "cust_phone=01726315133" -d "cust_email=test@example.com" \
+  -d "callback_url=https://example.com/cb.php"
+```
+
+Use `https://sandbox.paystation.com.bd` instead if Sandbox Mode is ticked. A `status_code` of
+`"200"` plus a `payment_url` means the credentials and environment match.
+
+**`PS-NO-CREDENTIALS`** — Merchant ID or password is blank in the gateway config.
+
+**`PS-TOKEN-EXPIRED`** — The invoice page sat open longer than 30 minutes. Reload the invoice and
+click Pay Now again. **`PS-TOKEN-INVALID`** instead means the Merchant ID or password was changed
+after the page was rendered — reload the invoice.
+
+**`PS-NO-PHONE`** — PayStation requires `cust_phone`. Add a phone number to the client's profile.
+
+**`PS-TRANSPORT`** — The request never reached PayStation at all. Check outbound HTTPS from the web
+server; the log entry carries the exact cURL error.
 
 **`status_code 2001` on verification** — Merchant ID mismatch, or the credentials belong to the
 other environment. Confirm the Sandbox Mode setting matches the credentials in use.
