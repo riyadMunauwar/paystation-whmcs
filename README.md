@@ -111,6 +111,25 @@ Invoice page                 paystation_link()
 If the customer never returns, `includes/hooks/paystation_reconcile.php` performs the same
 verification on the next cron run.
 
+### Merchant IPN (optional)
+
+The callback file doubles as a PayStation Merchant IPN receiver, so you can give PayStation the
+same URL as your IPN URL:
+
+```
+https://your-whmcs-install.example/modules/gateways/callback/paystation.php
+```
+
+An IPN is a server-to-server `POST` with a JSON body rather than a browser redirect, and is told
+apart from a returning customer by that request shape. It is verified against the Transaction
+Status API exactly like a browser callback — the notification itself is never trusted — and then
+answered with an HTTP `200` JSON acknowledgement instead of a redirect. PayStation retries any
+non-2xx response, so unconfigured credentials and a failed status lookup answer `503` to keep the
+retry useful, while every settled outcome (including a genuinely failed payment) answers `200`.
+
+Configuring the IPN is optional: the browser callback and cron reconciliation already settle every
+payment between them. It mainly shortens the delay on payments the customer abandons after paying.
+
 ---
 
 ## Invoice numbers
@@ -241,6 +260,28 @@ you will instead have `<whmcs-root>/paystation-whmcs-1.0.0/modules/gateways/pays
 WHMCS never looks at. Also confirm `modules/gateways/paystation/whmcs.json` was uploaded — WHMCS
 8.x/9.x uses that manifest to build the entry under **Apps & Integrations → Payments**. Clear any
 PHP opcode cache after uploading.
+
+**"Unfortunately your payment attempt was not successful"** — This is WHMCS's generic text for
+`viewinvoice.php?id=N&paymentfailed=true`; it says nothing about the cause. The module logs the
+real reason before every one of those redirects, so open **Billing → Gateway Log**, filter to
+PayStation, and read the `reason` field of the newest entry. If the failure happened *immediately*
+on clicking Pay Now, the PayStation checkout was never reached and the entry comes from
+`redirect.php`; if it happened after returning from PayStation, it comes from the callback.
+
+**`status_code 1001` / "Invalid Credential" on initiate-payment** — The credentials belong to the
+other environment. Sandbox and production credentials are not interchangeable, and the endpoint is
+chosen solely by the **Sandbox Mode** checkbox. You can confirm a credential pair outside WHMCS:
+
+```bash
+curl -X POST "https://api.paystation.com.bd/initiate-payment" \
+  -d "merchantId=YOUR_ID" -d "password=YOUR_PASSWORD" \
+  -d "invoice_number=test-$(date +%s)" -d "currency=BDT" -d "payment_amount=10" \
+  -d "cust_name=Test" -d "cust_phone=01726315133" -d "cust_email=test@example.com" \
+  -d "callback_url=https://example.com/cb.php"
+```
+
+Use `https://sandbox.paystation.com.bd` instead if Sandbox Mode is ticked. A `status_code` of
+`"200"` plus a `payment_url` means the credentials and environment match.
 
 **"PayStation is not fully configured"** — Merchant ID or password is blank in the gateway config.
 

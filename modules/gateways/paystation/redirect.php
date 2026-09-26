@@ -62,35 +62,6 @@ function paystation_redirect_abort(array $gatewayParams, $invoiceId, $reason, ar
 }
 
 /**
- * Reduce a WHMCS stored phone number to the digits PayStation expects.
- *
- * WHMCS stores numbers such as "+880.1712345678"; PayStation expects a local
- * Bangladeshi format such as "01712345678".
- *
- * @param string $phone
- *
- * @return string Empty when nothing usable remains.
- */
-function paystation_normalise_phone($phone)
-{
-    $digits = preg_replace('/\D+/', '', (string) $phone);
-
-    if ($digits === '') {
-        return '';
-    }
-
-    // Strip the Bangladesh country code when a local number follows it.
-    if (strpos($digits, '880') === 0 && strlen($digits) > 11) {
-        $digits = substr($digits, 3);
-    }
-    if (strlen($digits) === 10 && strpos($digits, '1') === 0) {
-        $digits = '0' . $digits;
-    }
-
-    return $digits;
-}
-
-/**
  * Short, human readable description of what is being paid for.
  *
  * @param int $invoiceId
@@ -225,7 +196,7 @@ if ($customerName === '') {
 }
 
 $customerEmail = trim((string) $client['email']);
-$customerPhone = paystation_normalise_phone($client['phonenumber']);
+$customerPhone = Helper::normalisePhone($client['phonenumber']);
 
 if ($customerPhone === '') {
     paystation_redirect_abort(

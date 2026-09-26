@@ -310,6 +310,38 @@ class Helper
     }
 
     /**
+     * Reduce a WHMCS stored phone number to the digits PayStation expects.
+     *
+     * WHMCS stores numbers such as "+880.1712345678"; PayStation expects a
+     * local Bangladeshi format such as "01712345678".
+     *
+     * Lives here rather than in redirect.php so the payment button can apply
+     * exactly the same test before it is rendered.
+     *
+     * @param string $phone
+     *
+     * @return string Empty when nothing usable remains.
+     */
+    public static function normalisePhone($phone)
+    {
+        $digits = preg_replace('/\D+/', '', (string) $phone);
+
+        if ($digits === '') {
+            return '';
+        }
+
+        // Strip the Bangladesh country code when a local number follows it.
+        if (strpos($digits, '880') === 0 && strlen($digits) > 11) {
+            $digits = substr($digits, 3);
+        }
+        if (strlen($digits) === 10 && strpos($digits, '1') === 0) {
+            $digits = '0' . $digits;
+        }
+
+        return $digits;
+    }
+
+    /**
      * Work out what to charge at PayStation and what to credit in WHMCS.
      *
      * WHMCS is always credited with the invoice-currency balance. Any merchant

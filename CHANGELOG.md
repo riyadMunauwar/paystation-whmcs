@@ -26,6 +26,17 @@ a **major** bump means a breaking change to the gateway configuration fields, th
 
 ### Fixed
 
+- The callback endpoint now answers PayStation's Merchant IPN with an HTTP 2xx JSON
+  acknowledgement instead of a `302` redirect. PayStation treats any non-2xx response as a failed
+  delivery and retries, so pointing the merchant IPN URL at this file previously produced an
+  endless retry loop even though every notification had in fact been processed. A browser coming
+  back from the hosted checkout is still redirected to its invoice; the two are told apart by the
+  IPN's `POST` + `application/json` request shape. Conditions a retry could genuinely resolve —
+  unconfigured credentials, and a failed status lookup — answer `503` so the retry still happens.
+- `paystation_link()` no longer renders a Pay Now button when the client has no usable phone
+  number. PayStation requires `cust_phone`, so `redirect.php` aborted on it, and the customer was
+  bounced straight back to the invoice with WHMCS's generic "your payment attempt was not
+  successful" message and no indication of what to fix. The invoice now explains it up front.
 - `redirect.php` now aborts with a clear gateway-log entry when the Merchant ID or password is
   blank, instead of generating a PayStation invoice number and posting a request that cannot
   authenticate. The callback already made this check.

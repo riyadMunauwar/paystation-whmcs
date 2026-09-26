@@ -193,6 +193,31 @@ function paystation_link($params)
         return paystation_notice($amounts['error'], 'danger');
     }
 
+    // PayStation requires cust_phone, and redirect.php aborts without one.
+    // Catch it here so the customer is told what to fix instead of being sent
+    // to a button that can only ever fail. The check is skipped when WHMCS did
+    // not supply clientdetails, so an unexpected params shape never hides a
+    // working button - redirect.php still enforces the real requirement.
+    if (isset($params['clientdetails']) && is_array($params['clientdetails'])) {
+        $phone = isset($params['clientdetails']['phonenumber'])
+            ? $params['clientdetails']['phonenumber']
+            : '';
+
+        if (Helper::normalisePhone($phone) === '') {
+            Helper::log($params, [
+                'context' => 'Payment Button',
+                'invoice_id' => $invoiceId,
+                'user_id' => $userId,
+                'error' => 'Client has no usable phone number; PayStation requires cust_phone.',
+            ], 'Configuration Error');
+
+            return paystation_notice(
+                'PayStation requires a contact phone number. Please add one to your account details, then reload this page.',
+                'danger'
+            );
+        }
+    }
+
     $expires = time() + Helper::TOKEN_TTL;
     $token = Helper::paymentToken($invoiceId, $userId, $expires, $params);
 

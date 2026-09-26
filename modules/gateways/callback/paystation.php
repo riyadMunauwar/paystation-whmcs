@@ -9,10 +9,18 @@
  * server to server from the Transaction Status API before any payment is
  * applied.
  *
- * Safe to hit repeatedly - refreshes, duplicate notifications and the cron
- * reconciliation all converge on the same idempotent settlement routine.
+ * The same endpoint doubles as the PayStation IPN receiver, so this URL can be
+ * given to PayStation as the merchant IPN URL. An IPN arrives as a POST with a
+ * JSON body rather than as a browser redirect, and is answered with an HTTP
+ * 2xx acknowledgement instead of a redirect - PayStation retries the
+ * notification until it receives one.
+ *
+ * Safe to hit repeatedly - refreshes, duplicate notifications, IPN retries and
+ * the cron reconciliation all converge on the same idempotent settlement
+ * routine.
  *
  * @see https://developers.whmcs.com/payment-gateways/callbacks/
+ * @see https://paystation.com.bd/documentation (Merchant IPN)
  *
  * @package WHMCS\Module\Gateway\Paystation
  */
@@ -82,23 +90,101 @@ function paystation_callback_value(array $payload, array $keys)
 }
 
 /**
- * Log the outcome and send the customer back to their invoice.
+ * True when this request is PayStation's server to server IPN rather than the
+ * customer's browser coming back from the hosted checkout.
  *
- * @param array  $gatewayParams
- * @param array  $payload
- * @param string $status    Gateway log status column.
- * @param array  $detail    Extra context for the gateway log.
- * @param int    $invoiceId Zero when unknown.
- * @param string $flag      WHMCS result flag, e.g. paymentsuccess.
+ * The browser return is a GET carrying query parameters; the IPN is a POST
+ * with a JSON body. The two need different answers: a browser wants a
+ * redirect, while the IPN wants an HTTP 2xx acknowledgement and will keep
+ * retrying until it gets one.
+ *
+ * @return bool
+ */
+function paystation_callback_is_ipn()
+{
+    static $isIpn = null;
+
+    if ($isIpn !== null) {
+        return $isIpn;
+    }
+
+    $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : '';
+    if ($method !== 'POST') {
+        return $isIpn = false;
+    }
+
+    $contentType = '';
+    foreach (['CONTENT_TYPE', 'HTTP_CONTENT_TYPE'] as $key) {
+        if (!empty($_SERVER[$key])) {
+            $contentType = strtolower((string) $_SERVER[$key]);
+            break;
+        }
+    }
+
+    return $isIpn = (strpos($contentType, 'application/json') !== false);
+}
+
+/**
+ * Acknowledge the IPN and stop.
+ *
+ * PayStation retries the notification on any non 2xx response, so a definite
+ * outcome - including a payment that failed at the wallet - is acknowledged
+ * with a 200. Only a condition that a later retry could genuinely resolve is
+ * answered with an error status.
+ *
+ * @param int    $httpStatus
+ * @param string $status     Gateway log status, echoed back for the merchant.
  *
  * @return void
  */
-function paystation_callback_finish(array $gatewayParams, array $payload, $status, array $detail, $invoiceId, $flag)
+function paystation_callback_acknowledge($httpStatus, $status)
 {
+    $httpStatus = (int) $httpStatus;
+
+    if (!headers_sent()) {
+        http_response_code($httpStatus);
+        header('Content-Type: application/json');
+    }
+
+    echo json_encode([
+        'status' => ($httpStatus >= 200 && $httpStatus < 300) ? 'success' : 'error',
+        'result' => (string) $status,
+    ]);
+
+    exit;
+}
+
+/**
+ * Log the outcome, then either acknowledge the IPN or send the customer back
+ * to their invoice.
+ *
+ * @param array  $gatewayParams
+ * @param array  $payload
+ * @param string $status     Gateway log status column.
+ * @param array  $detail     Extra context for the gateway log.
+ * @param int    $invoiceId  Zero when unknown.
+ * @param string $flag       WHMCS result flag, e.g. paymentsuccess.
+ * @param int    $ipnStatus  HTTP status used when answering an IPN.
+ *
+ * @return void
+ */
+function paystation_callback_finish(
+    array $gatewayParams,
+    array $payload,
+    $status,
+    array $detail,
+    $invoiceId,
+    $flag,
+    $ipnStatus = 200
+) {
     Helper::log($gatewayParams, array_merge([
-        'context' => 'Callback',
+        'context' => paystation_callback_is_ipn() ? 'IPN' : 'Callback',
         'callback_payload' => $payload,
     ], $detail), $status);
+
+    if (paystation_callback_is_ipn()) {
+        paystation_callback_acknowledge($ipnStatus, $status);
+    }
 
     if ((int) $invoiceId > 0) {
         Helper::redirect(Helper::invoiceUrl($invoiceId, $flag));
@@ -151,7 +237,10 @@ if (!$api->isConfigured()) {
         'Configuration Error',
         ['reason' => 'PayStation credentials are not configured.'],
         0,
-        ''
+        '',
+        // Fixing the configuration makes a retried IPN succeed, so do not
+        // acknowledge this one as handled.
+        503
     );
 }
 
@@ -236,7 +325,10 @@ if (!$verification['accepted']) {
             'invoice_id' => $invoiceId,
         ],
         $invoiceId,
-        'paymentfailed'
+        'paymentfailed',
+        // The lookup, not the payment, is what failed. Settlement is
+        // idempotent, so let PayStation retry alongside the cron pass.
+        503
     );
 }
 
