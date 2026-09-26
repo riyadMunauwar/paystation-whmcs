@@ -55,6 +55,12 @@ add_hook('AfterCronJob', 1, function ($vars) {
             'exception' => $e->getMessage(),
         ], 'Error');
 
+        // Cron output is easy to miss, so mirror it into the module log file
+        // where every other PayStation failure is recorded.
+        Helper::logToFile('PS-CRON', 'Reconciliation pass threw ' . get_class($e) . ': ' . $e->getMessage(), [
+            'file' => $e->getFile() . ':' . $e->getLine(),
+        ]);
+
         return;
     }
 

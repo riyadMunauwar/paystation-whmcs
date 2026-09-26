@@ -29,36 +29,80 @@ $gatewayModuleName = Helper::MODULE_NAME;
 $gatewayParams = getGatewayVariables($gatewayModuleName);
 
 if (empty($gatewayParams['type'])) {
-    http_response_code(403);
-    exit('PayStation gateway module is not activated.');
+    $error = Helper::fail(
+        [],
+        'PS-NOT-ACTIVATED',
+        'The PayStation gateway module is not activated in Setup > Payments > Payment Gateways.',
+        ['context' => 'Initiate Payment'],
+        'This payment method is not available right now. Please contact support.'
+    );
+
+    Helper::renderErrorPage($error, Helper::maySeeDetail([]), 403);
 }
 
-Helper::ensureSchema();
+if (!Helper::ensureSchema()) {
+    // Without the ledger table nothing downstream can be recorded, and an
+    // unrecorded checkout is a payment that can never be matched back to an
+    // invoice. Stop here rather than sending the customer to PayStation.
+    $error = Helper::fail(
+        $gatewayParams,
+        'PS-DB-SCHEMA',
+        'The PayStation ledger table ' . Helper::TABLE . ' is missing and could not be created. '
+            . (Helper::lastInternalError() !== ''
+                ? Helper::lastInternalError()
+                : 'Check that the WHMCS database user has CREATE privileges.'),
+        [
+            'context' => 'Initiate Payment',
+            'invoice_id' => isset($_POST['invoiceid']) ? (int) $_POST['invoiceid'] : 0,
+            'table' => Helper::TABLE,
+        ],
+        'PayStation is not set up correctly on this site yet. Please contact support.'
+    );
+
+    $postedInvoiceId = isset($_POST['invoiceid']) ? (int) $_POST['invoiceid'] : 0;
+    if ($postedInvoiceId > 0) {
+        Helper::redirect(Helper::invoiceErrorUrl($postedInvoiceId, $error));
+    }
+
+    Helper::renderErrorPage($error, Helper::maySeeDetail($gatewayParams), 500);
+}
 
 /**
  * Abort the checkout, log why, and return the customer to their invoice.
  *
+ * The reason is recorded in the module log file, the WHMCS gateway log and the
+ * WHMCS activity log, and is handed to the invoice page so the customer sees
+ * what actually went wrong instead of the generic WHMCS "your payment attempt
+ * was not successful" banner.
+ *
  * @param array  $gatewayParams
  * @param int    $invoiceId
- * @param string $reason  Operator facing reason for the gateway log.
- * @param array  $context Extra data for the gateway log.
+ * @param string $code            Stable error code, e.g. PS-DECLINED.
+ * @param string $reason          Operator facing reason.
+ * @param array  $context         Extra data for the logs.
+ * @param string $customerMessage Wording shown to the customer. Defaults to
+ *                                the reason when it is already safe to show.
  *
  * @return void
  */
-function paystation_redirect_abort(array $gatewayParams, $invoiceId, $reason, array $context = [])
-{
-    Helper::log($gatewayParams, array_merge([
+function paystation_redirect_abort(
+    array $gatewayParams,
+    $invoiceId,
+    $code,
+    $reason,
+    array $context = [],
+    $customerMessage = ''
+) {
+    $error = Helper::fail($gatewayParams, $code, $reason, array_merge([
         'context' => 'Initiate Payment',
-        'invoice_id' => $invoiceId,
-        'reason' => $reason,
-    ], $context), 'Unsuccessful');
+        'invoice_id' => (int) $invoiceId,
+    ], $context), $customerMessage);
 
-    if ($invoiceId > 0) {
-        Helper::redirect(Helper::invoiceUrl($invoiceId, 'paymentfailed'));
+    if ((int) $invoiceId > 0) {
+        Helper::redirect(Helper::invoiceErrorUrl($invoiceId, $error));
     }
 
-    http_response_code(400);
-    exit('Unable to start the PayStation payment. Please try again from your invoice.');
+    Helper::renderErrorPage($error, Helper::maySeeDetail($gatewayParams), 400);
 }
 
 /**
@@ -107,16 +151,43 @@ $expires = isset($_POST['expires']) ? (int) $_POST['expires'] : 0;
 $token = isset($_POST['token']) ? (string) $_POST['token'] : '';
 
 if ($invoiceId <= 0) {
-    http_response_code(400);
-    exit('Missing invoice reference.');
+    $error = Helper::fail(
+        $gatewayParams,
+        'PS-NO-INVOICE',
+        'The Pay Now submission carried no invoice id. This endpoint only accepts the signed form '
+            . 'rendered on the invoice page.',
+        ['context' => 'Initiate Payment', 'posted_keys' => array_keys($_POST)],
+        'This payment link is incomplete. Please start again from your invoice.'
+    );
+
+    Helper::renderErrorPage($error, Helper::maySeeDetail($gatewayParams), 400);
 }
 
 if (!Helper::verifyPaymentToken($token, $invoiceId, $userId, $expires, $gatewayParams)) {
     // Either a forged request or a payment page that sat open too long.
+    $expired = $expires > 0 && $expires < time();
+
     paystation_redirect_abort(
         $gatewayParams,
         $invoiceId,
-        'Invalid or expired payment token. Reload the invoice and try again.'
+        $expired ? 'PS-TOKEN-EXPIRED' : 'PS-TOKEN-INVALID',
+        $expired
+            ? ('The signed Pay Now token expired at ' . gmdate('Y-m-d H:i:s', $expires)
+                . ' UTC (' . Helper::TOKEN_TTL . "s lifetime); the invoice page had been open too long.")
+            : ('The signed Pay Now token did not verify. This happens when the Merchant ID or Merchant '
+                . 'Password was changed after the invoice page was rendered, when the gateway is '
+                . 'configured differently from the one that rendered the button, or when the request '
+                . 'did not come from the invoice page at all.'),
+        [
+            'expires' => $expires,
+            'expires_utc' => $expires > 0 ? gmdate('Y-m-d H:i:s', $expires) : '',
+            'now_utc' => gmdate('Y-m-d H:i:s'),
+            'user_id' => $userId,
+            'token_present' => $token !== '',
+        ],
+        $expired
+            ? 'This payment page expired before you pressed Pay Now. Please reload the invoice and try again.'
+            : 'This payment request could not be verified. Please reload the invoice and try again.'
     );
 }
 
@@ -124,27 +195,50 @@ if (!Helper::verifyPaymentToken($token, $invoiceId, $userId, $expires, $gatewayP
 // 2. Validate the invoice itself.
 // ---------------------------------------------------------------------------
 
+$invoiceLookupError = '';
+
 try {
     $invoice = Capsule::table('tblinvoices')->where('id', $invoiceId)->first();
 } catch (\Exception $e) {
     $invoice = null;
+    $invoiceLookupError = $e->getMessage();
 }
 
 if (!$invoice) {
-    paystation_redirect_abort($gatewayParams, $invoiceId, 'Invoice not found.');
+    paystation_redirect_abort(
+        $gatewayParams,
+        $invoiceId,
+        $invoiceLookupError !== '' ? 'PS-DB-READ' : 'PS-INVOICE-MISSING',
+        $invoiceLookupError !== ''
+            ? ('Could not read invoice ' . $invoiceId . ' from tblinvoices: ' . $invoiceLookupError)
+            : ('Invoice ' . $invoiceId . ' does not exist in tblinvoices.'),
+        ['db_error' => $invoiceLookupError],
+        'This invoice could not be loaded. Please contact support.'
+    );
 }
 
 $invoice = (array) $invoice;
 
 if ((int) $invoice['userid'] !== $userId) {
-    paystation_redirect_abort($gatewayParams, $invoiceId, 'Invoice does not belong to the signed client id.');
+    paystation_redirect_abort(
+        $gatewayParams,
+        $invoiceId,
+        'PS-INVOICE-OWNER',
+        'Invoice ' . $invoiceId . ' belongs to client ' . (int) $invoice['userid']
+            . ' but the signed request claimed client ' . $userId . '.',
+        ['invoice_owner' => (int) $invoice['userid'], 'signed_user_id' => $userId],
+        'This invoice is not available on your account. Please contact support.'
+    );
 }
 
 if (in_array($invoice['status'], ['Cancelled', 'Draft', 'Refunded'], true)) {
     paystation_redirect_abort(
         $gatewayParams,
         $invoiceId,
-        'Invoice status "' . $invoice['status'] . '" cannot be paid.'
+        'PS-INVOICE-STATUS',
+        'Invoice ' . $invoiceId . ' has status "' . $invoice['status'] . '", which cannot be paid.',
+        ['invoice_status' => $invoice['status']],
+        'This invoice is marked "' . $invoice['status'] . '" and cannot be paid. Please contact support.'
     );
 }
 
@@ -153,36 +247,74 @@ if ($invoice['status'] === 'Paid') {
 }
 
 $currency = '';
+$currencyLookupError = '';
 try {
     $currency = (string) Capsule::table('tblcurrencies')
         ->where('id', (int) $invoice['currency'])
         ->value('code');
 } catch (\Exception $e) {
     $currency = '';
+    $currencyLookupError = $e->getMessage();
+}
+
+if ($currency === '') {
+    paystation_redirect_abort(
+        $gatewayParams,
+        $invoiceId,
+        'PS-CURRENCY',
+        'Could not resolve the currency code for tblcurrencies id ' . (int) $invoice['currency']
+            . ($currencyLookupError !== '' ? ': ' . $currencyLookupError : '.'),
+        ['currency_id' => (int) $invoice['currency'], 'db_error' => $currencyLookupError],
+        'The currency on this invoice could not be resolved. Please contact support.'
+    );
 }
 
 $balance = Helper::invoiceBalance($invoiceId);
 $amounts = Helper::computeAmounts($balance, $currency, $gatewayParams);
 
 if ($amounts['error'] !== '') {
-    paystation_redirect_abort($gatewayParams, $invoiceId, $amounts['error'], [
-        'currency' => $currency,
-        'balance' => $balance,
-    ]);
+    paystation_redirect_abort(
+        $gatewayParams,
+        $invoiceId,
+        'PS-AMOUNT',
+        $amounts['error'] . ' (balance ' . $balance . ' ' . $currency
+            . ', surcharge ' . $amounts['surcharge'] . ', rate ' . $amounts['rate'] . ')',
+        [
+            'currency' => $currency,
+            'balance' => $balance,
+            'invoice_total' => isset($invoice['total']) ? $invoice['total'] : null,
+            'conversion_rate_setting' => isset($gatewayParams['conversionRate']) ? $gatewayParams['conversionRate'] : '',
+            'surcharge_percent_setting' => isset($gatewayParams['surchargePercent']) ? $gatewayParams['surchargePercent'] : '',
+            'surcharge_fixed_setting' => isset($gatewayParams['surchargeFixed']) ? $gatewayParams['surchargeFixed'] : '',
+        ],
+        $amounts['error']
+    );
 }
 
 // ---------------------------------------------------------------------------
 // 3. Gather the customer detail PayStation requires.
 // ---------------------------------------------------------------------------
 
+$clientLookupError = '';
+
 try {
     $client = Capsule::table('tblclients')->where('id', $userId)->first();
 } catch (\Exception $e) {
     $client = null;
+    $clientLookupError = $e->getMessage();
 }
 
 if (!$client) {
-    paystation_redirect_abort($gatewayParams, $invoiceId, 'Client record not found for invoice.');
+    paystation_redirect_abort(
+        $gatewayParams,
+        $invoiceId,
+        $clientLookupError !== '' ? 'PS-DB-READ' : 'PS-CLIENT-MISSING',
+        $clientLookupError !== ''
+            ? ('Could not read client ' . $userId . ' from tblclients: ' . $clientLookupError)
+            : ('Client ' . $userId . ' does not exist in tblclients, so PayStation cannot be given a customer.'),
+        ['user_id' => $userId, 'db_error' => $clientLookupError],
+        'Your account details could not be loaded. Please contact support.'
+    );
 }
 
 $client = (array) $client;
@@ -202,7 +334,12 @@ if ($customerPhone === '') {
     paystation_redirect_abort(
         $gatewayParams,
         $invoiceId,
-        'Client has no usable phone number; PayStation requires cust_phone. Ask the client to add one to their profile.'
+        'PS-NO-PHONE',
+        'Client ' . $userId . ' has no usable phone number; PayStation requires cust_phone. '
+            . 'tblclients.phonenumber holds ' . strlen(trim((string) $client['phonenumber']))
+            . ' characters and no digits at all.',
+        ['user_id' => $userId, 'phonenumber' => (string) $client['phonenumber']],
+        'PayStation requires a contact phone number. Please add one to your account details, then try again.'
     );
 }
 
@@ -228,15 +365,35 @@ if (!$api->isConfigured()) {
     paystation_redirect_abort(
         $gatewayParams,
         $invoiceId,
-        'PayStation credentials are not configured. Set the Merchant ID and Merchant Password in the gateway configuration.'
+        'PS-NO-CREDENTIALS',
+        'PayStation credentials are not configured. Set the Merchant ID and Merchant Password under '
+            . 'Setup > Payments > Payment Gateways > PayStation. Merchant ID '
+            . (trim((string) $gatewayParams['merchantId']) === '' ? 'is empty' : 'is set') . ', Merchant Password '
+            . (trim((string) $gatewayParams['password']) === '' ? 'is empty' : 'is set') . '.',
+        ['sandbox' => !empty($gatewayParams['testMode'])],
+        'This payment method is not fully configured yet. Please contact support.'
+    );
+}
+
+if (!function_exists('curl_init')) {
+    paystation_redirect_abort(
+        $gatewayParams,
+        $invoiceId,
+        'PS-NO-CURL',
+        'The PHP cURL extension is not loaded, so this server cannot reach PayStation at all.',
+        ['php_version' => PHP_VERSION],
+        'This payment method cannot be reached from this server. Please contact support.'
     );
 }
 
 $invoicePrefix = isset($gatewayParams['invoicePrefix']) ? $gatewayParams['invoicePrefix'] : '';
 $debug = !empty($gatewayParams['debugLogging']);
+$endpoint = $api->baseUrl() . '/initiate-payment';
 
 $response = null;
 $invoiceNumber = '';
+$fields = [];
+$attempt = 0;
 
 // PayStation answers 1008 for a duplicate invoice_number. That should not
 // happen (the timestamp guarantees a fresh value), but a clock adjustment or a
@@ -261,7 +418,17 @@ for ($attempt = 1; $attempt <= 3; $attempt++) {
         paystation_redirect_abort(
             $gatewayParams,
             $invoiceId,
-            'Could not write the PayStation transaction record. Check that ' . Helper::TABLE . ' exists and is writable.'
+            'PS-DB-WRITE',
+            'Could not insert the PayStation ledger row into ' . Helper::TABLE . '. '
+                . (Helper::lastInternalError() !== ''
+                    ? Helper::lastInternalError()
+                    : 'Check that the table exists and the WHMCS database user can write to it.'),
+            [
+                'table' => Helper::TABLE,
+                'invoice_number' => $invoiceNumber,
+                'db_error' => Helper::lastInternalError(),
+            ],
+            'The payment could not be started because it could not be recorded. Please contact support.'
         );
     }
 
@@ -294,12 +461,23 @@ for ($attempt = 1; $attempt <= 3; $attempt++) {
         Helper::log($gatewayParams, [
             'context' => 'Initiate Payment Request',
             'attempt' => $attempt,
-            'endpoint' => $api->baseUrl() . '/initiate-payment',
+            'endpoint' => $endpoint,
             'request' => $fields,
             'response' => $response['json'] ?: $response['raw'],
             'http_code' => $response['httpCode'],
             'curl_error' => $response['error'],
         ], $response['accepted'] ? 'Success' : 'Unsuccessful');
+
+        // Mirrored into the module log file so a verbose trace survives the
+        // WHMCS gateway log being switched off or pruned.
+        Helper::logToFile('PS-TRACE', 'initiate-payment attempt ' . $attempt, [
+            'invoice_id' => $invoiceId,
+            'endpoint' => $endpoint,
+            'request' => $fields,
+            'http_code' => $response['httpCode'],
+            'curl_error' => $response['error'],
+            'response' => $response['json'] ?: $response['raw'],
+        ]);
     }
 
     if ($response['statusCode'] !== Api::CODE_DUPLICATE_INVOICE) {
@@ -324,15 +502,52 @@ if (!$response['accepted'] || $paymentUrl === '') {
         'last_response' => $response['raw'] !== '' ? $response['raw'] : $response['error'],
     ]);
 
-    $reason = $response['error'] !== ''
-        ? $response['error']
-        : ('PayStation declined the request (status_code ' . $response['statusCode'] . '): ' . $response['message']);
+    // Three different things can land here, and telling them apart is the
+    // whole point: the request never reached PayStation, PayStation answered
+    // with a rejection, or PayStation accepted it but sent no checkout URL.
+    if ($response['error'] !== '') {
+        $code = 'PS-TRANSPORT';
+        $reason = 'Could not complete the call to ' . $endpoint . ': ' . $response['error']
+            . ' (HTTP ' . $response['httpCode'] . '). This is a connectivity problem on the web server '
+            . '- outbound HTTPS, DNS or the CA bundle - not a PayStation decision.';
+        $customerMessage = 'We could not reach PayStation to start your payment. Please try again in a moment.';
+    } elseif (!$response['accepted']) {
+        $code = 'PS-DECLINED';
+        $reason = 'PayStation rejected the checkout request at ' . $endpoint . ' with status_code "'
+            . $response['statusCode'] . '" and status "' . $response['status'] . '": '
+            . ($response['message'] !== '' ? $response['message'] : '(no message returned)')
+            . ' [HTTP ' . $response['httpCode'] . ']'
+            . ($response['statusCode'] === Api::CODE_INVALID_TOKEN
+                ? ' - status_code 2001 means the Merchant ID or Merchant Password is wrong for this '
+                    . 'environment. Sandbox and production credentials are not interchangeable.'
+                : '')
+            . ($response['statusCode'] === Api::CODE_DUPLICATE_INVOICE
+                ? ' - status_code 1008 means the invoice_number was already used; all '
+                    . $attempt . ' attempts collided.'
+                : '');
+        $customerMessage = 'PayStation could not start this payment'
+            . ($response['message'] !== '' ? ': ' . $response['message'] : '.')
+            . ' Please try again or contact support.';
+    } else {
+        $code = 'PS-NO-URL';
+        $reason = 'PayStation accepted the request but returned no payment_url, so there is nowhere '
+            . 'to send the customer. Response keys: ' . implode(', ', array_keys($response['json'])) . '.';
+        $customerMessage = 'PayStation did not return a checkout page for this payment. Please contact support.';
+    }
 
-    paystation_redirect_abort($gatewayParams, $invoiceId, $reason, [
+    paystation_redirect_abort($gatewayParams, $invoiceId, $code, $reason, [
         'invoice_number' => $invoiceNumber,
+        'endpoint' => $endpoint,
+        'sandbox' => !empty($gatewayParams['testMode']),
+        'attempts' => $attempt,
         'http_code' => $response['httpCode'],
+        'curl_error' => $response['error'],
+        'paystation_status_code' => $response['statusCode'],
+        'paystation_status' => $response['status'],
+        'paystation_message' => $response['message'],
+        'request' => isset($fields) ? $fields : [],
         'response' => $response['json'] ?: $response['raw'],
-    ]);
+    ], $customerMessage);
 }
 
 // Only accept a checkout URL that actually belongs to PayStation.
@@ -346,10 +561,22 @@ if ($scheme !== 'https' || !$hostIsPaystation) {
         'last_response' => $response['raw'],
     ]);
 
-    paystation_redirect_abort($gatewayParams, $invoiceId, 'Refusing to redirect to an unexpected payment URL.', [
-        'invoice_number' => $invoiceNumber,
-        'payment_url' => $paymentUrl,
-    ]);
+    paystation_redirect_abort(
+        $gatewayParams,
+        $invoiceId,
+        'PS-BAD-URL',
+        'Refusing to redirect to "' . $paymentUrl . '": the checkout URL must be https and on a '
+            . 'paystation.com.bd host, but the scheme was "' . $scheme . '" and the host was "'
+            . (is_string($host) ? $host : '(none)') . '".',
+        [
+            'invoice_number' => $invoiceNumber,
+            'payment_url' => $paymentUrl,
+            'scheme' => $scheme,
+            'host' => is_string($host) ? $host : '',
+        ],
+        'PayStation returned an unexpected checkout address, so the payment was stopped for your safety. '
+            . 'Please contact support.'
+    );
 }
 
 Helper::updateTransaction($invoiceNumber, [
@@ -369,5 +596,9 @@ Helper::log($gatewayParams, [
     'sandbox' => !empty($gatewayParams['testMode']),
     'message' => $response['message'],
 ], 'Payment Link Created');
+
+// The checkout started, so nothing from an earlier failed attempt should still
+// be waiting to be shown when the customer comes back.
+Helper::clearError();
 
 Helper::redirect($paymentUrl);

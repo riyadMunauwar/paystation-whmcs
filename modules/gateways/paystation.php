@@ -151,19 +151,42 @@ function paystation_config()
  */
 function paystation_link($params)
 {
-    Helper::ensureSchema();
+    $invoiceId = (int) $params['invoiceid'];
+
+    // Anything the redirect endpoint or the callback failed on is shown here,
+    // in place of the generic WHMCS "your payment attempt was not successful"
+    // banner, so the customer and the merchant both see the real cause.
+    $failure = paystation_renderStoredError($params, $invoiceId);
+
+    if (!Helper::ensureSchema()) {
+        return $failure . paystation_configError(
+            $params,
+            $invoiceId,
+            'PS-DB-SCHEMA',
+            'The PayStation ledger table ' . Helper::TABLE . ' is missing and could not be created. '
+                . (Helper::lastInternalError() !== ''
+                    ? Helper::lastInternalError()
+                    : 'Check that the WHMCS database user has CREATE privileges.'),
+            'PayStation is not set up correctly on this site yet. Please contact support.'
+        );
+    }
 
     $merchantId = trim((string) $params['merchantId']);
     $password = trim((string) $params['password']);
 
     if ($merchantId === '' || $password === '') {
-        return paystation_notice(
-            'PayStation is not fully configured. Please contact support.',
-            'danger'
+        return $failure . paystation_configError(
+            $params,
+            $invoiceId,
+            'PS-NO-CREDENTIALS',
+            'PayStation credentials are missing. Merchant ID '
+                . ($merchantId === '' ? 'is empty' : 'is set') . ', Merchant Password '
+                . ($password === '' ? 'is empty' : 'is set')
+                . '. Set both under Setup > Payments > Payment Gateways > PayStation.',
+            'PayStation is not fully configured. Please contact support.'
         );
     }
 
-    $invoiceId = (int) $params['invoiceid'];
     $currency = isset($params['currency']) ? (string) $params['currency'] : '';
 
     // The client id is signed into the token and re-checked against the invoice
@@ -182,15 +205,15 @@ function paystation_link($params)
 
     $amounts = Helper::computeAmounts($params['amount'], $currency, $params);
     if ($amounts['error'] !== '') {
-        Helper::log($params, [
-            'context' => 'Payment Button',
-            'invoice_id' => $invoiceId,
-            'currency' => $currency,
-            'amount' => $params['amount'],
-            'error' => $amounts['error'],
-        ], 'Configuration Error');
-
-        return paystation_notice($amounts['error'], 'danger');
+        return $failure . paystation_configError(
+            $params,
+            $invoiceId,
+            'PS-AMOUNT',
+            $amounts['error'] . ' Invoice amount "' . $params['amount'] . '" in ' . $currency
+                . ', conversion rate setting "' . (isset($params['conversionRate']) ? $params['conversionRate'] : '')
+                . '".',
+            $amounts['error']
+        );
     }
 
     // PayStation requires cust_phone, and redirect.php aborts without one.
@@ -204,16 +227,14 @@ function paystation_link($params)
             : '';
 
         if (Helper::normalisePhone($phone) === '') {
-            Helper::log($params, [
-                'context' => 'Payment Button',
-                'invoice_id' => $invoiceId,
-                'user_id' => $userId,
-                'error' => 'Client has no usable phone number; PayStation requires cust_phone.',
-            ], 'Configuration Error');
-
-            return paystation_notice(
-                'PayStation requires a contact phone number. Please add one to your account details, then reload this page.',
-                'danger'
+            return $failure . paystation_configError(
+                $params,
+                $invoiceId,
+                'PS-NO-PHONE',
+                'Client ' . $userId . ' has no usable phone number; PayStation requires cust_phone. '
+                    . 'The stored value holds ' . strlen(trim((string) $phone)) . ' characters and no digits.',
+                'PayStation requires a contact phone number. Please add one to your account details, '
+                    . 'then reload this page.'
             );
         }
     }
@@ -224,6 +245,20 @@ function paystation_link($params)
     $buttonLabel = !empty($params['langpaynow']) ? $params['langpaynow'] : 'Pay Now';
     $action = Helper::redirectEndpointUrl();
 
+    if ($action === '' || strpos($action, 'http') !== 0) {
+        return $failure . paystation_configError(
+            $params,
+            $invoiceId,
+            'PS-NO-SYSTEM-URL',
+            'The WHMCS System URL is not set, so the Pay Now form and the PayStation callback URL '
+                . 'cannot be built. Set it under Setup > General Settings > General > WHMCS System URL. '
+                . 'Resolved value: "' . $action . '".',
+            'This payment method is not configured correctly. Please contact support.'
+        );
+    }
+
+    $html = $failure;
+
     $fields = [
         'invoiceid' => $invoiceId,
         'userid' => $userId,
@@ -231,7 +266,7 @@ function paystation_link($params)
         'token' => $token,
     ];
 
-    $html = '<form method="post" action="' . htmlspecialchars($action, ENT_QUOTES, 'UTF-8') . '">';
+    $html .= '<form method="post" action="' . htmlspecialchars($action, ENT_QUOTES, 'UTF-8') . '">';
     foreach ($fields as $name => $value) {
         $html .= '<input type="hidden" name="' . htmlspecialchars($name, ENT_QUOTES, 'UTF-8')
             . '" value="' . htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8') . '" />';
@@ -296,4 +331,109 @@ function paystation_notice($message, $type = 'info')
 {
     return '<div class="alert alert-' . htmlspecialchars($type, ENT_QUOTES, 'UTF-8') . '">'
         . htmlspecialchars($message, ENT_QUOTES, 'UTF-8') . '</div>';
+}
+
+/**
+ * Show the failure that the redirect endpoint or the callback recorded.
+ *
+ * WHMCS's own paymentfailed banner says only "Unfortunately your payment
+ * attempt was not successful", which is useless for diagnosing anything. Every
+ * failure path in this module stores the real cause instead, and this renders
+ * it in its place, together with the error code and reference needed to find
+ * the matching log entry.
+ *
+ * @param array $params    WHMCS gateway parameters.
+ * @param int   $invoiceId
+ *
+ * @return string HTML, empty when there is nothing to show.
+ */
+function paystation_renderStoredError(array $params, $invoiceId)
+{
+    // Only render on the page the customer was actually redirected to, so a
+    // stale message never reappears on an unrelated visit.
+    if (!isset($_GET[Helper::ERROR_QUERY_KEY])) {
+        Helper::clearError();
+
+        return '';
+    }
+
+    $error = Helper::pendingError($invoiceId);
+
+    if (!$error) {
+        return paystation_notice(
+            'That payment attempt did not complete, but the reason is no longer available. '
+                . 'Please try again.',
+            'warning'
+        );
+    }
+
+    return paystation_errorBox($params, $error);
+}
+
+/**
+ * Record a configuration problem found while rendering the button, and render
+ * it in the same shape as a redirect failure.
+ *
+ * @param array  $params
+ * @param int    $invoiceId
+ * @param string $code
+ * @param string $reason          Operator facing detail, logged in full.
+ * @param string $customerMessage
+ *
+ * @return string HTML
+ */
+function paystation_configError(array $params, $invoiceId, $code, $reason, $customerMessage)
+{
+    // The button is re-rendered on every view of the invoice, so a standing
+    // misconfiguration is logged once per hour rather than once per refresh.
+    $error = Helper::failOnce($params, $code, $reason, [
+        'context' => 'Payment Button',
+        'invoice_id' => (int) $invoiceId,
+    ], $customerMessage);
+
+    // It is being shown right here, so nothing needs to survive to the next
+    // page load.
+    Helper::clearError();
+
+    return paystation_errorBox($params, $error);
+}
+
+/**
+ * Render one failure: what happened, and how to find it in the logs.
+ *
+ * The technical reason is only added for an admin or when verbose logging is
+ * on, so ordinary customers get the plain explanation while whoever is
+ * debugging gets the exact cause on the page itself.
+ *
+ * @param array $params
+ * @param array $error  Output of Helper::fail().
+ *
+ * @return string HTML
+ */
+function paystation_errorBox(array $params, array $error)
+{
+    $escape = function ($value) {
+        return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
+    };
+
+    $html = '<div class="alert alert-danger" style="text-align:left">'
+        . '<strong>' . $escape($error['message']) . '</strong>';
+
+    if (Helper::maySeeDetail($params)) {
+        if ($error['reason'] !== $error['message']) {
+            $html .= '<div style="margin-top:10px;font-family:monospace;font-size:12px;white-space:pre-wrap;'
+                . 'word-break:break-word">' . $escape($error['reason']) . '</div>';
+        }
+
+        $html .= '<div style="margin-top:10px;font-size:12px">Logged to <code>'
+            . $escape($error['log_file'] !== '' ? $error['log_file'] : 'gateway log only (no writable log directory)')
+            . '</code>, and to Billing &raquo; Gateway Log and Utilities &raquo; Logs &raquo; Activity Log.</div>';
+    }
+
+    $html .= '<div style="margin-top:10px;font-size:12px;opacity:.85">Error code <code>'
+        . $escape($error['code']) . '</code> &middot; reference <code>' . $escape($error['reference'])
+        . '</code>. Quote this reference when contacting support.</div>'
+        . '</div>';
+
+    return $html;
 }

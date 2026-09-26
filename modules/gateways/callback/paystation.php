@@ -38,11 +38,25 @@ $gatewayModuleName = basename(__FILE__, '.php');
 $gatewayParams = getGatewayVariables($gatewayModuleName);
 
 if (empty($gatewayParams['type'])) {
+    Helper::logToFile(
+        'PS-CB-NOT-ACTIVATED',
+        'A PayStation callback arrived but the gateway module is not activated in WHMCS, so the '
+            . 'payment cannot be verified or applied.',
+        ['query' => $_GET, 'post' => $_POST]
+    );
+
     http_response_code(403);
     exit('Module Not Activated');
 }
 
-Helper::ensureSchema();
+if (!Helper::ensureSchema()) {
+    Helper::logToFile(
+        'PS-CB-DB-SCHEMA',
+        'A PayStation callback arrived but the ledger table ' . Helper::TABLE . ' is missing and '
+            . 'could not be created. ' . Helper::lastInternalError(),
+        ['table' => Helper::TABLE]
+    );
+}
 
 /**
  * Every value PayStation sent us, whatever transport it chose.
@@ -158,6 +172,11 @@ function paystation_callback_acknowledge($httpStatus, $status)
  * Log the outcome, then either acknowledge the IPN or send the customer back
  * to their invoice.
  *
+ * A failure is additionally recorded through Helper::fail(), which writes it to
+ * the module log file, the gateway log and the activity log, and hands it to
+ * the invoice page so the customer is told what actually went wrong instead of
+ * the generic WHMCS "your payment attempt was not successful" banner.
+ *
  * @param array  $gatewayParams
  * @param array  $payload
  * @param string $status     Gateway log status column.
@@ -165,6 +184,9 @@ function paystation_callback_acknowledge($httpStatus, $status)
  * @param int    $invoiceId  Zero when unknown.
  * @param string $flag       WHMCS result flag, e.g. paymentsuccess.
  * @param int    $ipnStatus  HTTP status used when answering an IPN.
+ * @param string $errorCode  Set on a failure, e.g. PS-CB-DECLINED. Switches
+ *                           the redirect to the module's own error display.
+ * @param string $customerMessage Wording shown to the customer on a failure.
  *
  * @return void
  */
@@ -175,16 +197,47 @@ function paystation_callback_finish(
     array $detail,
     $invoiceId,
     $flag,
-    $ipnStatus = 200
+    $ipnStatus = 200,
+    $errorCode = '',
+    $customerMessage = ''
 ) {
+    $context = paystation_callback_is_ipn() ? 'IPN' : 'Callback';
+
+    if ($errorCode !== '') {
+        $error = Helper::fail(
+            $gatewayParams,
+            $errorCode,
+            isset($detail['reason']) ? (string) $detail['reason'] : $status,
+            array_merge([
+                'context' => $context,
+                'invoice_id' => (int) $invoiceId,
+                'callback_payload' => $payload,
+            ], $detail),
+            $customerMessage
+        );
+
+        if (paystation_callback_is_ipn()) {
+            paystation_callback_acknowledge($ipnStatus, $status);
+        }
+
+        if ((int) $invoiceId > 0) {
+            Helper::redirect(Helper::invoiceErrorUrl($invoiceId, $error));
+        }
+
+        Helper::renderErrorPage($error, Helper::maySeeDetail($gatewayParams), 200);
+    }
+
     Helper::log($gatewayParams, array_merge([
-        'context' => paystation_callback_is_ipn() ? 'IPN' : 'Callback',
+        'context' => $context,
         'callback_payload' => $payload,
     ], $detail), $status);
 
     if (paystation_callback_is_ipn()) {
         paystation_callback_acknowledge($ipnStatus, $status);
     }
+
+    // Nothing went wrong, so clear anything a previous attempt left waiting.
+    Helper::clearError();
 
     if ((int) $invoiceId > 0) {
         Helper::redirect(Helper::invoiceUrl($invoiceId, $flag));
@@ -196,6 +249,13 @@ function paystation_callback_finish(
 $payload = paystation_callback_payload();
 
 if (!$payload) {
+    Helper::logToFile(
+        'PS-CB-EMPTY',
+        'A PayStation callback arrived with no data at all, so there is nothing to identify a '
+            . 'transaction by.',
+        ['method' => isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : '']
+    );
+
     http_response_code(400);
     exit('No callback data received.');
 }
@@ -235,12 +295,19 @@ if (!$api->isConfigured()) {
         $gatewayParams,
         $payload,
         'Configuration Error',
-        ['reason' => 'PayStation credentials are not configured.'],
+        [
+            'reason' => 'PayStation credentials are not configured, so the callback cannot verify '
+                . 'this payment server to server. Set the Merchant ID and Merchant Password under '
+                . 'Setup > Payments > Payment Gateways > PayStation.',
+        ],
         0,
         '',
         // Fixing the configuration makes a retried IPN succeed, so do not
         // acknowledge this one as handled.
-        503
+        503,
+        'PS-CB-NO-CREDENTIALS',
+        'Your payment could not be confirmed because PayStation is not fully configured here. '
+            . 'Please contact support before paying again.'
     );
 }
 
@@ -276,12 +343,19 @@ if (!$transaction) {
         $payload,
         'Unsuccessful',
         [
-            'reason' => 'No local PayStation transaction matches this callback.',
+            'reason' => 'No row in ' . Helper::TABLE . ' matches this callback. Looked up invoice_number "'
+                . $invoiceNumber . '" and trx_id "' . $reportedTrxId . '". Either the checkout was '
+                . 'started somewhere other than this WHMCS install, or the ledger row was removed.',
             'invoice_number' => $invoiceNumber,
             'trx_id' => $reportedTrxId,
+            'callback_keys' => array_keys($payload),
         ],
         $guessedInvoiceId,
-        $guessedInvoiceId > 0 ? 'paymentfailed' : ''
+        '',
+        200,
+        'PS-CB-NO-MATCH',
+        'We could not match this payment to an order on your account. '
+            . 'If money left your account, please contact support with the reference below.'
     );
 }
 
@@ -318,17 +392,28 @@ if (!$verification['accepted']) {
         'Verification Failed',
         [
             'reason' => $verification['error'] !== ''
-                ? $verification['error']
-                : ('PayStation status lookup returned status_code ' . $verification['statusCode']
-                    . ': ' . $verification['message']),
+                ? ('Could not reach the PayStation transaction-status API: ' . $verification['error']
+                    . ' (HTTP ' . $verification['httpCode'] . '). The payment itself may well have '
+                    . 'succeeded; cron reconciliation will retry.')
+                : ('The PayStation transaction-status API answered status_code "'
+                    . $verification['statusCode'] . '" status "' . $verification['status'] . '": '
+                    . ($verification['message'] !== '' ? $verification['message'] : '(no message)')
+                    . '. The payment itself may well have succeeded; cron reconciliation will retry.'),
             'invoice_number' => $invoiceNumber,
-            'invoice_id' => $invoiceId,
+            'http_code' => $verification['httpCode'],
+            'curl_error' => $verification['error'],
+            'paystation_status_code' => $verification['statusCode'],
+            'paystation_message' => $verification['message'],
+            'response' => $verification['json'] ?: $verification['raw'],
         ],
         $invoiceId,
-        'paymentfailed',
+        '',
         // The lookup, not the payment, is what failed. Settlement is
         // idempotent, so let PayStation retry alongside the cron pass.
-        503
+        503,
+        'PS-CB-UNVERIFIED',
+        'We could not confirm this payment with PayStation yet. If it was taken, it will be applied '
+            . 'automatically within a few minutes - please do not pay twice.'
     );
 }
 
@@ -349,13 +434,17 @@ if (!Helper::invoiceExists($invoiceId)) {
         $payload,
         'Unsuccessful',
         [
-            'reason' => 'WHMCS invoice ' . $invoiceId . ' no longer exists; payment needs manual review.',
+            'reason' => 'WHMCS invoice ' . $invoiceId . ' no longer exists, so a settled PayStation '
+                . 'payment has nowhere to go. The ledger row was marked orphaned and needs manual review.',
             'invoice_number' => $invoiceNumber,
             'trx_status' => $statusData['trx_status'],
             'trx_id' => $statusData['trx_id'],
         ],
         0,
-        ''
+        '',
+        200,
+        'PS-CB-ORPHANED',
+        'This payment no longer has a matching invoice. Please contact support with the reference below.'
     );
 }
 
@@ -408,4 +497,29 @@ if ($outcome['status'] === 'processing') {
     paystation_callback_finish($gatewayParams, $payload, 'Pending', $detail, $invoiceId, '');
 }
 
-paystation_callback_finish($gatewayParams, $payload, 'Unsuccessful', $detail, $invoiceId, 'paymentfailed');
+// Nothing was applied. Either PayStation said no, or the verified transaction
+// did not match what this invoice asked for - which is a much more serious
+// condition, because money may well have left the customer's account.
+$detail['reason'] = 'PayStation reported trx_status "' . $outcome['status'] . '" for invoice_number '
+    . $invoiceNumber . ($outcome['reason'] !== '' ? ' (' . $outcome['reason'] . ')' : '')
+    . '. No payment was applied to invoice ' . $invoiceId . '.';
+
+$mismatched = in_array($outcome['status'], ['mismatch', 'orphaned'], true);
+
+paystation_callback_finish(
+    $gatewayParams,
+    $payload,
+    $mismatched ? 'Verification Failed' : 'Unsuccessful',
+    $detail,
+    $invoiceId,
+    '',
+    200,
+    $mismatched ? 'PS-CB-MISMATCH' : 'PS-CB-DECLINED',
+    $mismatched
+        ? ('This payment could not be matched to your invoice'
+            . ($outcome['reason'] !== '' ? ': ' . $outcome['reason'] : '.')
+            . ' Please do not pay again - contact support with the reference below.')
+        : ('PayStation did not complete this payment (' . $outcome['status'] . ')'
+            . ($outcome['reason'] !== '' ? ': ' . $outcome['reason'] : '.')
+            . ' Nothing has been charged to your invoice. Please try again or use another method.')
+);
