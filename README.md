@@ -225,10 +225,20 @@ Every failure in this module is recorded in three places and shown on screen, so
 does not go through never leaves you guessing.
 
 **On the invoice page.** Instead of WHMCS's generic *"Unfortunately your payment attempt was not
-successful"*, the module renders its own message naming the actual cause, an **error code** such as
-`PS-DECLINED`, and a **reference** such as `PS9F2A41C7`. Customers see the plain explanation; an
-admin, or anyone viewing while **Verbose Gateway Log** is enabled, additionally sees the full
-technical reason and the path of the log file.
+successful"*, the module renders its own message, an **error code** such as `PS-DECLINED`, and a
+**reference** such as `PS9F2A41C7`.
+
+Every failure carries two texts, and only one of them is ever public:
+
+| | Audience | Content | Where it appears |
+|---|---|---|---|
+| **Customer message** | anyone | What happened and what to do next. Names no file path, table, gateway setting, PHP extension, HTTP code or PayStation response. | The invoice page, plus the error code and reference. |
+| **Technical reason** | operators | The full cause: log paths, database errors, table names, endpoints, PayStation's own `status_code` and message, whether credentials are set. | The three logs below — and on screen **only** for a logged-in WHMCS admin. |
+
+**Verbose Gateway Log does not change what a customer sees.** It is a logging switch only, so
+turning it on to diagnose a problem never publishes server detail to customers paying at the time.
+To read the technical reason on the page itself, reproduce the failure while logged in as an admin;
+otherwise take the reference from the customer and look it up in the logs.
 
 **In `modules/gateways/paystation/logs/paystation-YYYY-MM-DD.log`.** Written on every failure,
 regardless of whether the WHMCS gateway log is enabled, and the first place to look:
@@ -270,7 +280,7 @@ unlike the gateway log, cannot be switched off.
 | `PS-AMOUNT` | Nothing left to pay, or a non-BDT invoice with no conversion rate set. |
 | `PS-NO-PHONE` | The client has no phone number; PayStation requires `cust_phone`. |
 | `PS-TRANSPORT` | The request never reached PayStation (DNS, firewall, TLS, timeout). |
-| `PS-DECLINED` | PayStation answered with a rejection; its own message is included. |
+| `PS-DECLINED` | PayStation answered with a rejection. Its `status_code` and message go to the logs; the customer is only told to try again. |
 | `PS-NO-URL` | PayStation accepted the request but returned no `payment_url`. |
 | `PS-BAD-URL` | The returned checkout URL was not HTTPS on a `paystation.com.bd` host. |
 | `PS-CB-NO-MATCH` | A callback arrived that matches no local transaction. |
@@ -349,8 +359,8 @@ longer uses that redirect: it returns you to the invoice with its own message na
 reason, plus an error code and reference. If you are still seeing WHMCS's wording, either an older
 copy of the module is installed, or the failed payment came from a *different* gateway.
 
-To see the full technical reason on the page itself, tick **Verbose Gateway Log** in the gateway
-configuration, or reproduce the failure while logged in as an admin. Either way the detail is in
+To see the full technical reason on the page itself, reproduce the failure while logged in as an
+admin — customers never get it, whatever the logging settings say. Either way the detail is in
 `modules/gateways/paystation/logs/paystation-YYYY-MM-DD.log` — see
 [Diagnosing a failure](#diagnosing-a-failure) for the error-code table. If the failure happened
 *immediately* on clicking Pay Now, the PayStation checkout was never reached and the entry comes

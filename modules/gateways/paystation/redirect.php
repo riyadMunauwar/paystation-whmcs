@@ -71,17 +71,20 @@ if (!Helper::ensureSchema()) {
  * Abort the checkout, log why, and return the customer to their invoice.
  *
  * The reason is recorded in the module log file, the WHMCS gateway log and the
- * WHMCS activity log, and is handed to the invoice page so the customer sees
- * what actually went wrong instead of the generic WHMCS "your payment attempt
- * was not successful" banner.
+ * WHMCS activity log. The customer message is handed to the invoice page so it
+ * can replace the generic WHMCS "your payment attempt was not successful"
+ * banner with something specific enough to act on.
  *
  * @param array  $gatewayParams
  * @param int    $invoiceId
  * @param string $code            Stable error code, e.g. PS-DECLINED.
- * @param string $reason          Operator facing reason.
+ * @param string $reason          Operator facing reason. Logged; only ever
+ *                                displayed to a logged in admin.
  * @param array  $context         Extra data for the logs.
- * @param string $customerMessage Wording shown to the customer. Defaults to
- *                                the reason when it is already safe to show.
+ * @param string $customerMessage Wording shown to the customer. Must name no
+ *                                path, table, setting or gateway response;
+ *                                omitting it yields the generic fallback, not
+ *                                the reason.
  *
  * @return void
  */
@@ -294,7 +297,7 @@ if ($amounts['error'] !== '') {
             'surcharge_percent_setting' => isset($gatewayParams['surchargePercent']) ? $gatewayParams['surchargePercent'] : '',
             'surcharge_fixed_setting' => isset($gatewayParams['surchargeFixed']) ? $gatewayParams['surchargeFixed'] : '',
         ],
-        $amounts['error']
+        $amounts['customer_error']
     );
 }
 
@@ -389,7 +392,7 @@ if (!function_exists('curl_init')) {
         'PS-NO-CURL',
         'The PHP cURL extension is not loaded, so this server cannot reach PayStation at all.',
         ['php_version' => PHP_VERSION],
-        'This payment method cannot be reached from this server. Please contact support.'
+        'This payment method is temporarily unavailable. Please contact support.'
     );
 }
 
@@ -532,9 +535,12 @@ if (!$response['accepted'] || $paymentUrl === '') {
                 ? ' - status_code 1008 means the invoice_number was already used; all '
                     . $attempt . ' attempts collided.'
                 : '');
-        $customerMessage = 'PayStation could not start this payment'
-            . ($response['message'] !== '' ? ': ' . $response['message'] : '.')
-            . ' Please try again or contact support.';
+        // PayStation's own message is kept for the logs only. It reports on the
+        // merchant account - "Invalid Credential", an inactive account, a
+        // disabled channel - which is nothing a customer can act on and
+        // nothing this site should publish.
+        $customerMessage = 'PayStation could not start this payment. Please try again, or use another '
+            . 'payment method if it keeps happening.';
     } else {
         $code = 'PS-NO-URL';
         $reason = 'PayStation accepted the request but returned no payment_url, so there is nowhere '

@@ -172,10 +172,10 @@ function paystation_callback_acknowledge($httpStatus, $status)
  * Log the outcome, then either acknowledge the IPN or send the customer back
  * to their invoice.
  *
- * A failure is additionally recorded through Helper::fail(), which writes it to
- * the module log file, the gateway log and the activity log, and hands it to
- * the invoice page so the customer is told what actually went wrong instead of
- * the generic WHMCS "your payment attempt was not successful" banner.
+ * A failure is additionally recorded through Helper::fail(), which writes the
+ * operator facing reason to the module log file, the gateway log and the
+ * activity log, and hands the customer facing message to the invoice page in
+ * place of the generic WHMCS "your payment attempt was not successful" banner.
  *
  * @param array  $gatewayParams
  * @param array  $payload
@@ -187,6 +187,8 @@ function paystation_callback_acknowledge($httpStatus, $status)
  * @param string $errorCode  Set on a failure, e.g. PS-CB-DECLINED. Switches
  *                           the redirect to the module's own error display.
  * @param string $customerMessage Wording shown to the customer on a failure.
+ *                           Must be safe for anyone to read: the reason in
+ *                           $detail is logged, not displayed.
  *
  * @return void
  */
@@ -515,11 +517,12 @@ paystation_callback_finish(
     '',
     200,
     $mismatched ? 'PS-CB-MISMATCH' : 'PS-CB-DECLINED',
+    // $outcome['reason'] stays in the logs. It quotes the expected and received
+    // amounts, the PayStation invoice number and the raw trx_status, which tell
+    // a customer nothing useful and describe this install's internals.
     $mismatched
-        ? ('This payment could not be matched to your invoice'
-            . ($outcome['reason'] !== '' ? ': ' . $outcome['reason'] : '.')
-            . ' Please do not pay again - contact support with the reference below.')
-        : ('PayStation did not complete this payment (' . $outcome['status'] . ')'
-            . ($outcome['reason'] !== '' ? ': ' . $outcome['reason'] : '.')
-            . ' Nothing has been charged to your invoice. Please try again or use another method.')
+        ? 'This payment could not be matched to your invoice. Please do not pay again - contact '
+            . 'support with the reference below and it will be sorted out.'
+        : 'PayStation did not complete this payment, and nothing has been charged to your invoice. '
+            . 'Please try again, or use another payment method.'
 );

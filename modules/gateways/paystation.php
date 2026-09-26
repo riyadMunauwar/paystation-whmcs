@@ -155,7 +155,8 @@ function paystation_link($params)
 
     // Anything the redirect endpoint or the callback failed on is shown here,
     // in place of the generic WHMCS "your payment attempt was not successful"
-    // banner, so the customer and the merchant both see the real cause.
+    // banner: the customer gets a plain explanation plus the error code and
+    // reference, while the technical cause stays in the logs.
     $failure = paystation_renderStoredError($params, $invoiceId);
 
     if (!Helper::ensureSchema()) {
@@ -233,7 +234,7 @@ function paystation_link($params)
             $amounts['error'] . ' Invoice amount "' . $params['amount'] . '" in ' . $currency
                 . ', conversion rate setting "' . (isset($params['conversionRate']) ? $params['conversionRate'] : '')
                 . '".',
-            $amounts['error']
+            $amounts['customer_error']
         );
     }
 
@@ -359,9 +360,9 @@ function paystation_notice($message, $type = 'info')
  *
  * WHMCS's own paymentfailed banner says only "Unfortunately your payment
  * attempt was not successful", which is useless for diagnosing anything. Every
- * failure path in this module stores the real cause instead, and this renders
- * it in its place, together with the error code and reference needed to find
- * the matching log entry.
+ * failure path in this module stores a customer safe explanation instead, and
+ * this renders it in its place, together with the error code and reference
+ * needed to find the matching log entry.
  *
  * @param array $params    WHMCS gateway parameters.
  * @param int   $invoiceId
@@ -422,9 +423,9 @@ function paystation_configError(array $params, $invoiceId, $code, $reason, $cust
 /**
  * Render one failure: what happened, and how to find it in the logs.
  *
- * The technical reason is only added for an admin or when verbose logging is
- * on, so ordinary customers get the plain explanation while whoever is
- * debugging gets the exact cause on the page itself.
+ * The technical reason is added for a logged in admin only. Customers get the
+ * plain explanation, the error code and the reference - never a log path, a
+ * table name or a database message.
  *
  * @param array $params
  * @param array $error  Output of Helper::fail().

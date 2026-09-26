@@ -50,6 +50,17 @@ class Helper
     /** How long a stored failure is still shown on the invoice, in seconds. */
     const ERROR_TTL = 1800;
 
+    /**
+     * What a customer is told when a failure carries no safe wording of its own.
+     *
+     * Operator facing reasons name file paths, table names, database errors,
+     * PHP extensions, endpoints and credential state. None of that belongs in
+     * front of a customer, so a failure that forgets to supply its own wording
+     * gets this instead of leaking its reason.
+     */
+    const CUSTOMER_FALLBACK_MESSAGE = 'This payment could not be completed. Please try again, or contact '
+        . 'support and quote the reference below.';
+
     /** @var string Message of the last swallowed internal exception. */
     protected static $lastInternalError = '';
 
@@ -372,6 +383,10 @@ class Helper
      *     @var float  $rate            Conversion rate applied.
      *     @var float  $gateway_amount  Amount to send to PayStation, in BDT.
      *     @var string $error           Non-empty when the amounts are unusable.
+     *                                  Operator facing: it names the gateway
+     *                                  setting that needs attention.
+     *     @var string $customer_error  The same condition worded for the
+     *                                  customer, naming no configuration.
      * }
      */
     public static function computeAmounts($dueAmount, $currencyCode, array $gatewayParams)
@@ -383,11 +398,14 @@ class Helper
             'rate' => 1.0,
             'gateway_amount' => 0.0,
             'error' => '',
+            'customer_error' => '',
         ];
 
         $invoiceAmount = round((float) $dueAmount, 2);
         if ($invoiceAmount <= 0) {
+            // Nothing internal about this one, so the customer gets it verbatim.
             $result['error'] = 'There is nothing left to pay on this invoice.';
+            $result['customer_error'] = $result['error'];
 
             return $result;
         }
@@ -408,6 +426,10 @@ class Helper
             if ($rate <= 0) {
                 $result['error'] = 'PayStation settles in ' . self::GATEWAY_CURRENCY . '. Set a conversion rate for '
                     . $currencyCode . ' in the gateway configuration.';
+                // The customer cannot act on a gateway setting, so they are not
+                // told there is one.
+                $result['customer_error'] = 'This payment method is not available for invoices in '
+                    . $currencyCode . '. Please choose another payment method, or contact support.';
 
                 return $result;
             }
@@ -415,7 +437,10 @@ class Helper
 
         $gatewayAmount = round($chargeable * $rate, 2);
         if ($gatewayAmount <= 0) {
-            $result['error'] = 'The calculated PayStation amount is not greater than zero.';
+            $result['error'] = 'The calculated PayStation amount is not greater than zero (balance '
+                . $invoiceAmount . ' ' . $currencyCode . ', surcharge ' . $surcharge . ', rate ' . $rate . ').';
+            $result['customer_error'] = 'The amount for this payment could not be calculated. '
+                . 'Please contact support.';
 
             return $result;
         }
@@ -1090,8 +1115,21 @@ class Helper
     //      error code, reference and log file path.
     //
     // The same failure is also stashed in the session so the invoice page can
-    // tell the customer what actually went wrong instead of falling back to
-    // the generic WHMCS "your payment attempt was not successful" banner.
+    // replace the generic WHMCS "your payment attempt was not successful"
+    // banner with something the customer can act on.
+    //
+    // Every failure therefore carries two texts, and the split is deliberate:
+    //
+    //   reason  - operator facing, logged in full. Names log paths, table
+    //             names, database errors, PHP extensions, endpoints, HTTP
+    //             codes, PayStation's own message and whether credentials are
+    //             set. Shown on screen to a logged in admin and to nobody
+    //             else, because it describes the hosting environment.
+    //   message - customer facing. Says what happened and what to do about it,
+    //             and never names a file, a table, a setting, a server or a
+    //             PayStation response. Always accompanied by the error code
+    //             and the reference, which are what support needs to find the
+    //             matching reason in the logs.
     // -----------------------------------------------------------------------
 
     /**
@@ -1379,12 +1417,15 @@ class Helper
      * @param array  $gatewayParams
      * @param string $code            Stable error code, e.g. PS-DECLINED.
      * @param string $reason          Operator facing explanation. Logged in
-     *                                full, and shown on screen to admins or
-     *                                when verbose logging is enabled.
+     *                                full; shown on screen to a logged in
+     *                                admin and to nobody else.
      * @param array  $context         Extra detail for the logs. An invoice_id
      *                                key binds the error to that invoice page.
-     * @param string $customerMessage What the customer is told. Defaults to
-     *                                $reason when no safer wording is given.
+     * @param string $customerMessage What the customer is told. Must be safe to
+     *                                show to anyone; when omitted the customer
+     *                                gets CUSTOMER_FALLBACK_MESSAGE rather than
+     *                                the reason, so an internal detail is never
+     *                                published by accident.
      *
      * @return array The stored error entry.
      */
@@ -1416,7 +1457,7 @@ class Helper
             'code' => (string) $code,
             'reference' => $reference,
             'reason' => (string) $reason,
-            'message' => $customerMessage !== '' ? (string) $customerMessage : (string) $reason,
+            'message' => $customerMessage !== '' ? (string) $customerMessage : self::CUSTOMER_FALLBACK_MESSAGE,
             'invoice_id' => $invoiceId,
             'log_file' => $logPath,
             'time' => time(),
@@ -1574,16 +1615,22 @@ class Helper
     /**
      * True when the current viewer may be shown the technical reason.
      *
-     * @param array $gatewayParams
+     * A logged in WHMCS administrator, and nobody else. The technical reason
+     * names absolute log paths, database errors, table names, PHP extensions,
+     * PayStation endpoints and whether credentials are set - detail about the
+     * hosting environment that must never reach a customer's browser.
+     *
+     * Verbose Gateway Log deliberately does not open this up: it is a logging
+     * switch, and a merchant turning it on to diagnose a problem would
+     * otherwise publish that detail to every customer paying at the time.
+     *
+     * @param array $gatewayParams Unused; kept so existing call sites and any
+     *                             local customisations keep working.
      *
      * @return bool
      */
-    public static function maySeeDetail(array $gatewayParams)
+    public static function maySeeDetail(array $gatewayParams = [])
     {
-        if (!empty($gatewayParams['debugLogging'])) {
-            return true;
-        }
-
         if (!self::startSession()) {
             return false;
         }

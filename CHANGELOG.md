@@ -53,9 +53,9 @@ a **major** bump means a breaking change to the gateway configuration fields, th
   `viewinvoice.php?id=N&paymentfailed=true` and names no cause, which made every failure —
   wrong credentials, a missing conversion rate, an unreachable API, a declined wallet — look
   identical. `redirect.php` and the callback now return the customer to the invoice with the
-  module's own message naming the actual cause, the error code and the reference. Admins, and
-  anyone viewing with Verbose Gateway Log enabled, additionally see the full technical reason and
-  the log file path on the page itself.
+  module's own message naming what the customer can act on, the error code and the reference.
+  The full technical reason goes to the logs, and is shown on the page only to a logged in admin —
+  see *Two audiences* under Security below.
 - Database exceptions in `Helper` are no longer silently swallowed. `ensureSchema()`,
   `createTransaction()`, `invoiceBalance()` and the lookup helpers all degraded to a bare `false`
   or `null`, which made a missing `CREATE` privilege indistinguishable from an ordinary empty
@@ -83,6 +83,28 @@ a **major** bump means a breaking change to the gateway configuration fields, th
 - `redirect.php` now aborts with a clear gateway-log entry when the Merchant ID or password is
   blank, instead of generating a PayStation invoice number and posting a request that cannot
   authenticate. The callback already made this check.
+
+### Security
+
+- **Two audiences: nothing about the server reaches a customer's browser.** Every failure now
+  carries a customer message and an operator reason, and the two never substitute for one another.
+  The reason — absolute log paths, database error text, `mod_paystation_transactions`, the
+  PayStation endpoint and `status_code`, the PHP version, whether each credential is set — goes to
+  the three logs, and on screen only to a logged in WHMCS admin. Specifically:
+  - `Verbose Gateway Log` no longer reveals the technical reason and the log file path on the page
+    to whoever is viewing it. It is a logging switch; a merchant turning it on to diagnose a
+    problem would otherwise have published server detail to every customer paying at the time.
+  - A failure that supplies no customer wording now gets a generic message instead of falling
+    through to its own reason, so a future failure path cannot leak internals by omission.
+  - PayStation's own rejection message (`Invalid Credential`, an inactive account, a disabled
+    channel) is logged but no longer shown: it describes the merchant account, not the payment.
+  - The callback no longer shows the customer expected-versus-received amounts, the PayStation
+    invoice number or the raw `trx_status` on a decline or a mismatch.
+  - A missing conversion rate tells the customer the currency is not available rather than naming
+    the gateway setting to change; a missing cURL extension no longer mentions the server.
+
+  Customers still get the error code and reference on screen, which is all support needs to find
+  the matching reason in the logs.
 
 ### Removed
 
