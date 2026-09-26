@@ -19,6 +19,7 @@ is marked as paid.
 
 ```
 modules/gateways/paystation.php                     Gateway module (config + Pay Now button)
+modules/gateways/paystation/whmcs.json              Module manifest (WHMCS needs this to list it)
 modules/gateways/paystation/redirect.php            Creates the checkout session, redirects
 modules/gateways/paystation/lib/loader.php          Class bootstrap
 modules/gateways/paystation/lib/Api.php             PayStation REST client
@@ -37,13 +38,25 @@ Requirements: PHP 7.4+ with `curl` and `json`, and outbound HTTPS to `api.paysta
 ## Installation
 
 Download the latest [release zip](https://github.com/riyadmunauwar/paystation-whmcs/releases/latest),
-or clone this repository. The zip unpacks to the same `modules/` and `includes/` layout shown
-above.
+or clone this repository.
 
-1. Upload the files into your WHMCS root directory.
-2. Go to **Configuration → System Settings → Payment Gateways → All Payment Gateways**.
-3. Select **PayStation** to activate it.
-4. Fill in the configuration (below) and **Save Changes**.
+1. Extract the zip. It unpacks into a single versioned folder, e.g.
+   `paystation-whmcs-1.0.0/`, which contains the `modules/` and `includes/` trees.
+2. Upload the **contents** of that folder — the `modules/` and `includes/` directories
+   themselves — into your WHMCS root, merging with the directories already there. Do **not**
+   upload the `paystation-whmcs-1.0.0/` folder itself: WHMCS only scans `modules/gateways/`
+   directly under its own root, so a nested copy is never detected.
+
+   When it is in the right place, this path exists:
+
+   ```
+   <whmcs-root>/modules/gateways/paystation.php
+   ```
+
+3. Go to **Configuration → Apps & Integrations → Payments** (WHMCS 8.x/9.x), or
+   **Configuration → System Settings → Payment Gateways → All Payment Gateways**.
+4. Select **PayStation** to activate it, fill in the configuration (below) and
+   **Save Changes**.
 5. Give PayStation your callback URL if their dashboard asks for a whitelisted one:
 
    ```
@@ -220,6 +233,14 @@ Everything lands under **Billing → Gateway Log**, keyed by context:
 ---
 
 ## Troubleshooting
+
+**PayStation does not appear in the payment gateway list at all** — WHMCS only scans
+`modules/gateways/` directly beneath its own root. Confirm that
+`<whmcs-root>/modules/gateways/paystation.php` exists; if the release folder was uploaded whole
+you will instead have `<whmcs-root>/paystation-whmcs-1.0.0/modules/gateways/paystation.php`, which
+WHMCS never looks at. Also confirm `modules/gateways/paystation/whmcs.json` was uploaded — WHMCS
+8.x/9.x uses that manifest to build the entry under **Apps & Integrations → Payments**. Clear any
+PHP opcode cache after uploading.
 
 **"PayStation is not fully configured"** — Merchant ID or password is blank in the gateway config.
 

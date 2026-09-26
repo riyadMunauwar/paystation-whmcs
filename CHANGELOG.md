@@ -9,7 +9,31 @@ a **major** bump means a breaking change to the gateway configuration fields, th
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- `modules/gateways/paystation/whmcs.json` module manifest. WHMCS 8.x/9.x reads this to build the
+  gateway's entry under **Configuration → Apps & Integrations → Payments**; without it the module
+  could be missing from that list even though the gateway file itself was valid. The release
+  workflow now verifies the manifest is present in the archive.
+
+### Changed
+
+- Installation instructions now spell out that only the **contents** of the release folder go into
+  the WHMCS root, and name the exact path to check. The previous wording claimed the zip unpacked
+  straight to `modules/`/`includes/`, but `git archive` wraps them in a versioned folder — uploading
+  that folder whole leaves the module somewhere WHMCS never scans.
+- Added a troubleshooting entry for the gateway not appearing in the payment gateway list.
+
+### Fixed
+
+- `redirect.php` now aborts with a clear gateway-log entry when the Merchant ID or password is
+  blank, instead of generating a PayStation invoice number and posting a request that cannot
+  authenticate. The callback already made this check.
+
+### Removed
+
+- The undocumented `VisibleDefault` key from `paystation_MetaData()`. It is not a WHMCS gateway
+  metadata parameter and did not do what its comment claimed.
 
 ## [1.0.0] - 2026-09-06
 

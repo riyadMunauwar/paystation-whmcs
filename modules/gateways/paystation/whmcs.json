@@ -1,0 +1,32 @@
+{
+  "schema": "1.0",
+  "type": "whmcs-gateways",
+  "name": "paystation",
+  "version": "1.0.0",
+  "license": "MIT",
+  "category": "payments",
+  "description": {
+    "name": "PayStation",
+    "tagline": "PayStation Bangladesh hosted checkout for WHMCS - bKash, Nagad, Rocket, Upay, cards and EMI.",
+    "long": "Third-party (hosted checkout) PayStation Bangladesh payment gateway for WHMCS 8.x and 9.x. Creates the checkout session server side, verifies every transaction against the PayStation Transaction Status API before any invoice is credited, keeps a local transaction ledger, and reconciles abandoned checkouts on each cron run.",
+    "features": [
+      "Hosted checkout - card details are never collected by WHMCS",
+      "Server-to-server verification before any payment is applied",
+      "Unique invoice number per attempt, so retries never collide",
+      "Idempotent settlement - a transaction can never be credited twice",
+      "Cron reconciliation of abandoned checkouts",
+      "Optional surcharge and non-BDT conversion, credited in the invoice currency"
+    ]
+  },
+  "support": {
+    "homepage": "https://github.com/riyadmunauwar/paystation-whmcs",
+    "support_url": "https://github.com/riyadmunauwar/paystation-whmcs/issues",
+    "docs_url": "https://github.com/riyadmunauwar/paystation-whmcs#readme"
+  },
+  "authors": [
+    {
+      "name": "Riyad Munauwar",
+      "homepage": "https://github.com/riyadmunauwar"
+    }
+  ]
+}

@@ -50,6 +50,7 @@ jobs:
           unzip -l "dist/paystation-whmcs-${NUMBER}.zip"
           for f in \
             modules/gateways/paystation.php \
+            modules/gateways/paystation/whmcs.json \
             modules/gateways/paystation/redirect.php \
             modules/gateways/paystation/lib/loader.php \
             modules/gateways/paystation/lib/Api.php \

@@ -51,8 +51,6 @@ function paystation_MetaData()
         // Hosted checkout: WHMCS must never collect card details locally.
         'DisableLocalCreditCardInput' => true,
         'TokenisedStorage' => false,
-        // WHMCS 9.0+: show on the order form by default once activated.
-        'VisibleDefault' => true,
     ];
 }
 

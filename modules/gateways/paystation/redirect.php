@@ -250,6 +250,17 @@ $customerAddress = implode(', ', $addressParts);
 // ---------------------------------------------------------------------------
 
 $api = new Api($gatewayParams['merchantId'], $gatewayParams['password'], !empty($gatewayParams['testMode']));
+
+if (!$api->isConfigured()) {
+    // Fail before burning a PayStation invoice number on a request that cannot
+    // possibly authenticate. The callback makes the same check.
+    paystation_redirect_abort(
+        $gatewayParams,
+        $invoiceId,
+        'PayStation credentials are not configured. Set the Merchant ID and Merchant Password in the gateway configuration.'
+    );
+}
+
 $invoicePrefix = isset($gatewayParams['invoicePrefix']) ? $gatewayParams['invoicePrefix'] : '';
 $debug = !empty($gatewayParams['debugLogging']);
 
